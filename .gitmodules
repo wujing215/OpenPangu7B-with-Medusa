@@ -1,0 +1,6 @@
+[submodule "third_party/Medusa"]
+	path = third_party/Medusa
+	url = https://github.com/FasterDecoding/Medusa.git
+[submodule "third_party/ShareGPT_Vicuna_unfiltered"]
+	path = third_party/ShareGPT_Vicuna_unfiltered
+	url = https://huggingface.co/datasets/Aeala/ShareGPT_Vicuna_unfiltered

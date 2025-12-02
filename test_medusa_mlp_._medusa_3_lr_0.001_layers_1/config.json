@@ -1,0 +1,7 @@
+{
+  "base_model_name_or_path": ".",
+  "medusa_num_heads": 3,
+  "medusa_num_layers": 1,
+  "transformers_version": "4.53.2",
+  "version": "2"
+}
