@@ -1,20 +1,31 @@
 import torch
 import torch.nn as nn
-from .modeling_llama_kv import LlamaForCausalLM as KVLlamaForCausalLM
-from .modeling_mistral_kv import MistralForCausalLM as KVMistralForCausalLM
-from .modeling_openpangu_dense import PanguEmbeddedForCausalLM
-# import transformers
+import sys
+import os
 
-# # monkey patch
-# transformers.models.llama.modeling_llama.LlamaForCausalLM = KVLlamaForCausalLM
-# transformers.models.mistral.modeling_mistral.MistralForCausalLM = KVMistralForCausalLM
+# 添加 third_party/Medusa 到 Python 路径
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+_medusa_path = os.path.join(_current_dir, "third_party", "Medusa")
+if _medusa_path not in sys.path:
+    sys.path.insert(0, _medusa_path)
+
+# 从 third_party/Medusa 导入 Llama 和 Mistral 的 KV 版本
+from medusa.model.modeling_llama_kv import LlamaForCausalLM as KVLlamaForCausalLM
+from medusa.model.modeling_mistral_kv import MistralForCausalLM as KVMistralForCausalLM
+
+# 从当前目录导入 Pangu 模型（已修改支持 Medusa）
+from modeling_openpangu_dense import PanguEmbeddedForCausalLM
 
 from transformers import PreTrainedModel, PretrainedConfig
-from .utils import *
-from .kv_cache import initialize_past_key_values
-from .medusa_choices import *
+
+# 从 third_party/Medusa 导入工具函数和 KV Cache
+from medusa.model.utils import *
+from medusa.model.kv_cache import initialize_past_key_values
+
+# 从当前目录导入修改过的 medusa_choices（包含 Pangu 配置）
+from medusa_choices import *
+
 from transformers import AutoTokenizer, AutoConfig
-import os
 from huggingface_hub import hf_hub_download
 import warnings
 

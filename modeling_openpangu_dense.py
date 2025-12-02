@@ -56,7 +56,10 @@ from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_u
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import LossKwargs, auto_docstring, can_return_tuple, logging
-from .configuration_openpangu_dense import PanguEmbeddedConfig
+try:
+    from .configuration_openpangu_dense import PanguEmbeddedConfig
+except ImportError:
+    from configuration_openpangu_dense import PanguEmbeddedConfig
 
 
 logger = logging.get_logger(__name__)

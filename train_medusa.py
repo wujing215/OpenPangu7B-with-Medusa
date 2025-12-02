@@ -131,7 +131,7 @@ class MedusaModelWrapper(nn.Module):
 # --- Trainer Parts ---
 
 class CustomizedTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         if hasattr(model, "module"):
             medusa = model.module.medusa
         else:
@@ -194,48 +194,83 @@ def rank0_print(*args):
 
 def preprocess(sources, tokenizer: transformers.PreTrainedTokenizer) -> Dict:
     conversations = []
-    prompts = []
-    for i, conversation in enumerate(sources):
-        # Handle cases where chat template might not be available or compatible
-        try:
-            prompt = tokenizer.apply_chat_template(conversation, tokenize=False)
-        except Exception as e:
-            # Fallback or simple concatenation if template fails
-            prompt = ""
-            for turn in conversation:
-                prompt += f"{turn['role']}: {turn['content']}\n"
-        prompts.append(prompt)
+    for i, source in enumerate(sources):
+        if isinstance(source, dict) and "conversations" in source:
+            raw_conv = source["conversations"]
+        else:
+            raw_conv = source
+
+        conversation = []
+        for turn in raw_conv:
+            if "from" in turn and "value" in turn:
+                role = turn["from"]
+                content = turn["value"]
+                if role == "human": role = "user"
+                if role == "gpt": role = "assistant"
+                conversation.append({"role": role, "content": content})
+            else:
+                conversation.append(turn)
         conversations.append(conversation)
 
-    encoding = tokenizer(
-        prompts,
-        return_tensors="pt",
-        padding="max_length",
-        truncation=True,
-        return_offsets_mapping=True,
-    )
-    targets = torch.full_like(encoding.input_ids, IGNORE_TOKEN_ID)
-    input_ids = encoding.input_ids
+    input_ids_list = []
+    labels_list = []
+    attention_mask_list = []
 
-    for conv_index, (conversation, target, prompt) in enumerate(zip(conversations, targets, prompts)):
+    for conversation in conversations:
+        input_ids = [tokenizer.bos_token_id] if tokenizer.add_bos_token else []
+        labels = [IGNORE_TOKEN_ID] if tokenizer.add_bos_token else []
+        
+        # Check if first message is system, if not, add default system prompt
+        if not conversation or conversation[0]['role'] != 'system':
+             sys_text = "[unused9]系统：[unused10]"
+             sys_ids = tokenizer(sys_text, add_special_tokens=False).input_ids
+             input_ids.extend(sys_ids)
+             labels.extend([IGNORE_TOKEN_ID] * len(sys_ids))
+
         for turn in conversation:
-            if turn["role"] == "assistant":
-                content = turn["content"]
-                try:
-                    start = prompt.index(content.strip())
-                    stop = start + len(content)
-                    indices= []
-                    for tok_index, (tok_start, tok_stop) in enumerate(encoding.offset_mapping[conv_index]):
-                        if tok_stop >= start or tok_start < tok_stop:
-                            indices.append(tok_index)
-                    target[indices] = encoding.input_ids[conv_index][indices]
-                except ValueError:
-                    pass 
+            role = turn['role']
+            content = turn['content']
+            
+            if role == 'user':
+                text = f"[unused9]用户：{content}[unused10]"
+                ids = tokenizer(text, add_special_tokens=False).input_ids
+                input_ids.extend(ids)
+                labels.extend([IGNORE_TOKEN_ID] * len(ids))
+            elif role == 'assistant':
+                text = f"[unused9]助手：{content}[unused10]"
+                ids = tokenizer(text, add_special_tokens=False).input_ids
+                input_ids.extend(ids)
+                labels.extend(ids)
+            elif role == 'system':
+                text = f"[unused9]系统：{content}[unused10]"
+                ids = tokenizer(text, add_special_tokens=False).input_ids
+                input_ids.extend(ids)
+                labels.extend([IGNORE_TOKEN_ID] * len(ids))
+        
+        # Convert to tensors
+        input_ids = torch.tensor(input_ids, dtype=torch.long)
+        labels = torch.tensor(labels, dtype=torch.long)
+        
+        # Truncate
+        if len(input_ids) > tokenizer.model_max_length:
+            input_ids = input_ids[:tokenizer.model_max_length]
+            labels = labels[:tokenizer.model_max_length]
+            
+        # Pad
+        padding_length = tokenizer.model_max_length - len(input_ids)
+        if padding_length > 0:
+            pad_id = tokenizer.pad_token_id
+            input_ids = torch.cat([input_ids, torch.full((padding_length,), pad_id, dtype=torch.long)])
+            labels = torch.cat([labels, torch.full((padding_length,), IGNORE_TOKEN_ID, dtype=torch.long)])
+            
+        input_ids_list.append(input_ids)
+        labels_list.append(labels)
+        attention_mask_list.append(input_ids.ne(tokenizer.pad_token_id))
 
     return dict(
-        input_ids=input_ids,
-        labels=targets,
-        attention_mask=input_ids.ne(tokenizer.pad_token_id),
+        input_ids=torch.stack(input_ids_list),
+        labels=torch.stack(labels_list),
+        attention_mask=torch.stack(attention_mask_list),
     )
 
 class SupervisedDataset(Dataset):
