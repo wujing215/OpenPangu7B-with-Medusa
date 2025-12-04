@@ -291,16 +291,36 @@ def main():
                         help="Single prompt for non-interactive mode")
     args = parser.parse_args()
 
-    # 解析路径
-    base_model_path = Path(args.base_model).expanduser().resolve()
-    medusa_dir = Path(args.medusa_dir).expanduser().resolve()
-    medusa_head_path = medusa_dir / args.medusa_file
+    # 判断是本地路径还是 HuggingFace repo ID
+    def is_local_path(path):
+        """检查是否是本地路径（而非 HF repo ID）"""
+        return (
+            path.startswith('.') or 
+            path.startswith('/') or 
+            path.startswith('~') or
+            (os.path.exists(path) and not '/' in path.split('/')[-1])  # 避免 user/repo 被误判
+        )
+    
+    # 解析路径 - 只对本地路径使用 resolve()
+    if is_local_path(args.base_model):
+        base_model_path = str(Path(args.base_model).expanduser().resolve())
+    else:
+        base_model_path = args.base_model
+        
+    if is_local_path(args.medusa_dir):
+        medusa_dir = str(Path(args.medusa_dir).expanduser().resolve())
+        medusa_head_path = os.path.join(medusa_dir, args.medusa_file)
+        tokenizer_path = medusa_dir
+    else:
+        medusa_dir = args.medusa_dir
+        medusa_head_path = args.medusa_dir  # HF repo，让 __init__ 处理下载
+        tokenizer_path = args.medusa_dir
 
     # 加载模型
     model = MedusaPanguInference(
-        base_model_path=str(base_model_path),
-        medusa_head_path=str(medusa_head_path),
-        tokenizer_path=str(medusa_dir),
+        base_model_path=base_model_path,
+        medusa_head_path=medusa_head_path,
+        tokenizer_path=tokenizer_path,
         device=args.device,
         dtype=torch.float16,
         medusa_num_heads=3,
