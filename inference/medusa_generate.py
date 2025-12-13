@@ -48,7 +48,7 @@ class MedusaPanguInference:
         tokenizer_path: str = None,
         device: str = "cuda:0",
         dtype: torch.dtype = torch.float16,
-        medusa_num_heads: int = 3,
+        medusa_num_heads: int = 5,
         medusa_num_layers: int = 1,
     ):
         self.device = device
@@ -262,10 +262,10 @@ def parse_output(output_text: str) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description="OpenPangu + Medusa 投机推理")
-    parser.add_argument("--base_model", type=str, default="..",
+    parser.add_argument("--base_model", type=str, default="~/work/openPangu-Embedded-7B-V1.1",
                         help="Base OpenPangu model path")
     parser.add_argument("--medusa_dir", type=str, 
-                        default="../test_medusa_mlp_._medusa_3_lr_0.001_layers_1",
+                        default="~/work/openPangu-Embedded-7B-V1.1/medusa_5heads_lr0.001_layers1_medusa_mlp_._medusa_5_lr_0.001_layers_1",
                         help="Directory containing medusa_lm_head.safetensors")
     parser.add_argument("--medusa_file", type=str, default="medusa_lm_head.safetensors",
                         help="Medusa weights filename")
