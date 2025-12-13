@@ -28,6 +28,73 @@ from transformers import AutoTokenizer, AutoConfig
 from huggingface_hub import hf_hub_download
 import warnings
 
+
+
+def evaluate_posterior_test(
+    logits, candidates, temperature, posterior_threshold=0.3, posterior_alpha=0.09, top_p=0.8, sampling='typical', fast=True
+):
+    """
+    【测试专用 - 强制接受模式】
+    强制接受固定长度的 token,用于测试理想情况下的最大吞吐量
+    
+    策略:
+    1. 对于每条 candidate 路径,计算它与 base model 预测的匹配度
+    2. 选择匹配最长的路径
+    3. 强制接受该路径的前 FORCE_ACCEPT_LEN+1 个 token
+    
+    Args:
+    - logits (torch.Tensor): shape [num_paths, tree_depth, vocab_size]
+    - candidates (torch.Tensor): shape [num_paths, tree_depth]
+    """
+    # ================= 配置区 =================
+    # 论文中 5 heads 的平均接受长度约为 3（包含 base model 的 1 个 + medusa 的 2 个）
+    # 当前只有 3 heads,尝试强制接受 2 个额外 token
+    FORCE_ACCEPT_LEN = 2
+    # =========================================
+    
+    # 【调试】打印形状信息（第一次调用时）
+    if not hasattr(evaluate_posterior_test, '_debug_printed'):
+        print(f"\n[DEBUG evaluate_posterior_test]")
+        print(f"  logits.shape = {logits.shape}")
+        print(f"  candidates.shape = {candidates.shape}")
+        print(f"  FORCE_ACCEPT_LEN = {FORCE_ACCEPT_LEN}")
+        evaluate_posterior_test._debug_printed = True
+    
+    # 计算每条路径与 greedy 预测的匹配度
+    # logits[:, :-1] 是所有路径的前 n-1 个位置
+    # torch.argmax(logits[:, :-1], dim=-1) 得到每个位置的 greedy token
+    # 形状: [num_paths, tree_depth-1]
+    greedy_tokens = torch.argmax(logits[:, :-1], dim=-1)
+    
+    # candidates[:, 1:] 是每条路径的第 2 到最后一个 token
+    # 形状: [num_paths, tree_depth-1]
+    
+    # 比较是否匹配
+    posterior_mask = (candidates[:, 1:] == greedy_tokens).int()
+    
+    # 计算每条路径的连续匹配长度
+    # torch.cumprod 会在第一个 0 之后全变成 0
+    candidates_accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
+    
+    # 找到匹配最长的路径
+    # 如果有多条路径长度相同,选第一条
+    accept_length = candidates_accept_length.max().item()
+    
+    if accept_length == 0:
+        # 没有任何匹配,只接受 base model 的 1 个 token
+        best_candidate = torch.tensor(0, dtype=torch.long, device=candidates.device)
+        accept_length = 0
+    else:
+        # 强制接受 min(FORCE_ACCEPT_LEN, accept_length) 个额外 token
+        accept_length = min(FORCE_ACCEPT_LEN, accept_length)
+        # 在所有能接受这么多 token 的路径中,选第一条
+        valid_candidates = (candidates_accept_length >= accept_length).nonzero(as_tuple=False)
+        best_candidate = valid_candidates[0].item()
+        best_candidate = torch.tensor(best_candidate, dtype=torch.long, device=candidates.device)
+    
+    return best_candidate, accept_length
+
+
 class MedusaConfig(PretrainedConfig):
     """
     Configuration class for Medusa model.
@@ -117,7 +184,8 @@ class MedusaModelABC(nn.Module):
         self.medusa = medusa_num_heads
         self.medusa_num_layers = medusa_num_layers
         self.base_model_name_or_path = base_model_name_or_path
-        # Tokenizer will be set later in from_pretrained or by the user
+        # [Modified] Tokenizer will be set later in from_pretrained or by the user
+        # self.tokenier = AutoTokenizer.from_pretrained(base_model_name_or_path)
         self.tokenizer = None
         # Create a list of Medusa heads
         self.medusa_head = nn.ModuleList(
@@ -140,7 +208,7 @@ class MedusaModelABC(nn.Module):
         *args,
         **kwargs,
     ):
-        # 如果已经传入了 config，直接使用它，否则尝试加载
+        # [New] 如果已经传入了 config，直接使用它，否则尝试加载
         if 'config' in kwargs and kwargs['config'] is not None:
             # 直接使用传入的 config，调用父类的 from_pretrained
             return super().from_pretrained(
@@ -162,6 +230,7 @@ class MedusaModelABC(nn.Module):
                 **kwargs,
                 config=config,
             )
+        # [Modified] 兼容旧版 Medusa 配置加载
         except Exception as e:
             print(f"AutoConfig loading failed: {e}, trying MedusaConfig...")
             config = MedusaConfig.from_pretrained(pretrained_model_name_or_path)
@@ -268,7 +337,7 @@ class MedusaModelABC(nn.Module):
         elif 'zephyr' in model_name:
             return zephyr_stage2
         elif 'pangu' in model_name:  # 新增Pangu配置
-            return pangu_stage2  # 见 medusa_choices.py
+            return pangu_5heads_top10  # 见 medusa_choices.py
         warnings.warn('Please specify medusa choice configuration!')
         return mc_sim_7b_63
 
@@ -382,6 +451,9 @@ class MedusaModelABC(nn.Module):
             best_candidate, accept_length = evaluate_posterior(
                 logits, candidates, temperature, posterior_threshold, posterior_alpha, top_p=top_p, sampling=sampling, fast=fast
             )
+            '''best_candidate, accept_length = evaluate_posterior_test(
+                logits, candidates, temperature, posterior_threshold, posterior_alpha, top_p=top_p, sampling = sampling, fast = fast
+            )'''
 
             # Update the input_ids and logits
             input_ids, logits, medusa_logits, new_token = update_inference_inputs(
