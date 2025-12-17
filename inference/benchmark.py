@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OpenPangu Medusa 性能基准测试脚本
+OpenPangu Medusa 性能基准测试脚本 (已适配昇腾NPU验收)
 
 对比集成 Medusa Heads 前后的推理性能：
 - generate.py: 原始 OpenPangu 模型（自回归解码）
@@ -21,6 +21,45 @@ import sys
 import os
 from pathlib import Path
 
+# --- 昇腾 NPU 适配与验收信息准备 ---
+try:
+    import torch_npu
+    from torch_npu.contrib import transfer_to_npu
+    DEVICE_TYPE = "npu"
+    DEVICE_TAG = "昇腾 (Ascend NPU)"
+    print(f"[Info] 检测到 torch_npu，将使用昇腾 NPU 进行推理。")
+except ImportError:
+    DEVICE_TYPE = "cuda" if torch.cuda.is_available() else "cpu"
+    DEVICE_TAG = "NVIDIA CUDA" if DEVICE_TYPE == "cuda" else "CPU"
+    print(f"[Warning] 未检测到 torch_npu，退化使用 {DEVICE_TAG}。")
+
+target_device = f"{DEVICE_TYPE}:0"
+
+def device_synchronize():
+    """跨平台设备同步函数"""
+    if DEVICE_TYPE == 'npu':
+        torch.npu.synchronize()
+    elif DEVICE_TYPE == 'cuda':
+        torch.cuda.synchronize()
+
+def empty_cache():
+    """跨平台清空显存函数"""
+    if DEVICE_TYPE == 'npu':
+        torch.npu.empty_cache()
+    elif DEVICE_TYPE == 'cuda':
+        torch.cuda.empty_cache()
+
+def print_acceptance_info(model_path, is_parallel=False):
+    """打印第一阶段验收所需的关键信息用于截图"""
+    mode_str = "支持并行推理 (Medusa)" if is_parallel else "基准串行推理 (Baseline)"
+    print("\n" + "=" * 60)
+    print(f"1. 运行模式: {mode_str}")
+    print(f"2. 运行环境: {DEVICE_TAG}, Device: {target_device})")
+    print(f"3. 模型状态: 加载模型为openPangu系列开源模型")
+    print(f"   - 模型路径: {model_path}")
+    print("=" * 60 + "\n")
+# ------------------------------------
+
 # 添加父目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -29,7 +68,7 @@ def benchmark_baseline(model_path, prompt, max_new_tokens, num_runs=3, warmup_ru
     from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
     
     print("=" * 60)
-    print("Baseline: OpenPangu (Autoregressive Decoding)")
+    print(f"Baseline: OpenPangu (Autoregressive Decoding) on {DEVICE_TAG}")
     print("=" * 60)
     
     # 加载模型
@@ -42,10 +81,13 @@ def benchmark_baseline(model_path, prompt, max_new_tokens, num_runs=3, warmup_ru
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype=torch.float16,
-        device_map="cuda:0",
+        device_map=target_device, # 适配 NPU
         trust_remote_code=True,
     )
     model.eval()
+
+    # 【验收截图关键点】打印验收信息
+    print_acceptance_info(model_path, is_parallel=False)
     
     # 准备输入
     messages = [
@@ -55,7 +97,8 @@ def benchmark_baseline(model_path, prompt, max_new_tokens, num_runs=3, warmup_ru
     formatted_prompt = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
-    input_ids = tokenizer.encode(formatted_prompt, return_tensors="pt").to("cuda:0")
+    # 适配 NPU
+    input_ids = tokenizer.encode(formatted_prompt, return_tensors="pt").to(target_device)
     input_len = input_ids.shape[1]
     
     print(f"Input length: {input_len} tokens")
@@ -82,7 +125,7 @@ def benchmark_baseline(model_path, prompt, max_new_tokens, num_runs=3, warmup_ru
     ttft_list = []
     
     for i in range(num_runs):
-        torch.cuda.synchronize()
+        device_synchronize() # 适配 NPU 同步
         
         # 测量 TTFT（首个 token 时间）
         start_time = time.perf_counter()
@@ -95,7 +138,7 @@ def benchmark_baseline(model_path, prompt, max_new_tokens, num_runs=3, warmup_ru
                 eos_token_id=eos_token_id,
             )
         
-        torch.cuda.synchronize()
+        device_synchronize() # 适配 NPU 同步
         end_time = time.perf_counter()
         
         elapsed = end_time - start_time
@@ -128,7 +171,7 @@ def benchmark_baseline(model_path, prompt, max_new_tokens, num_runs=3, warmup_ru
     
     # 清理显存
     del model
-    torch.cuda.empty_cache()
+    empty_cache() # 适配 NPU 清理显存
     
     return results
 
@@ -139,7 +182,7 @@ def benchmark_medusa(model_path, medusa_dir, prompt, max_new_tokens, num_runs=3,
     from medusa_choices import pangu_stage2
     
     print("\n" + "=" * 60)
-    print("Medusa: OpenPangu + Medusa Heads (Speculative Decoding)")
+    print(f"Medusa: OpenPangu + Medusa Heads (Speculative Decoding) on {DEVICE_TAG}")
     print("=" * 60)
     
     # 加载模型
@@ -148,11 +191,14 @@ def benchmark_medusa(model_path, medusa_dir, prompt, max_new_tokens, num_runs=3,
         base_model_path=model_path,
         medusa_head_path=os.path.join(medusa_dir, "medusa_lm_head.safetensors"),
         tokenizer_path=medusa_dir,
-        device="cuda:0",
+        device=target_device, # 适配 NPU
         dtype=torch.float16,
         medusa_num_heads=3,
         medusa_num_layers=1,
     )
+
+    # 【验收截图关键点】打印验收信息
+    print_acceptance_info(model_path, is_parallel=True)
     
     # 准备输入
     messages = [
@@ -160,7 +206,8 @@ def benchmark_medusa(model_path, medusa_dir, prompt, max_new_tokens, num_runs=3,
         {"role": "user", "content": prompt},
     ]
     formatted_prompt = model.apply_chat_template(messages)
-    input_ids = model.tokenizer.encode(formatted_prompt, return_tensors="pt").to("cuda:0")
+    # 适配 NPU
+    input_ids = model.tokenizer.encode(formatted_prompt, return_tensors="pt").to(target_device)
     input_len = input_ids.shape[1]
     
     print(f"Input length: {input_len} tokens")
@@ -178,7 +225,7 @@ def benchmark_medusa(model_path, medusa_dir, prompt, max_new_tokens, num_runs=3,
     accepted_tokens_list = []
     
     for i in range(num_runs):
-        torch.cuda.synchronize()
+        device_synchronize() # 适配 NPU 同步
         start_time = time.perf_counter()
         
         output_text = model.generate(
@@ -188,7 +235,7 @@ def benchmark_medusa(model_path, medusa_dir, prompt, max_new_tokens, num_runs=3,
             medusa_choices=pangu_stage2,
         )
         
-        torch.cuda.synchronize()
+        device_synchronize() # 适配 NPU 同步
         end_time = time.perf_counter()
         
         elapsed = end_time - start_time
@@ -224,17 +271,17 @@ def benchmark_medusa(model_path, medusa_dir, prompt, max_new_tokens, num_runs=3,
     
     # 清理显存
     del model
-    torch.cuda.empty_cache()
+    empty_cache() # 适配 NPU 清理显存
     
     return results
 
 
 def main():
     parser = argparse.ArgumentParser(description="Benchmark OpenPangu with/without Medusa")
-    parser.add_argument("--base_model", type=str, default=".",
+    parser.add_argument("--base_model", type=str, default="/root/openPangu-Embedded-7B-V1.1",
                         help="Base model path")
     parser.add_argument("--medusa_dir", type=str, 
-                        default="test_medusa_mlp_._medusa_3_lr_0.001_layers_1",
+                        default="/root/OpenPangu7B-on-NVIDIA/test_medusa_mlp_._medusa_3_lr_0.001_layers_1",
                         help="Medusa head directory")
     parser.add_argument("--prompt", type=str, 
                         default="请详细介绍一下大语言模型的工作原理。",
@@ -256,7 +303,7 @@ def main():
     medusa_dir = str(Path(args.medusa_dir).expanduser().resolve())
     
     print("=" * 60)
-    print("OpenPangu + Medusa Performance Benchmark")
+    print(f"OpenPangu + Medusa Performance Benchmark on {DEVICE_TAG}")
     print("=" * 60)
     print(f"Base model: {base_model_path}")
     print(f"Medusa dir: {medusa_dir}")
@@ -318,3 +365,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

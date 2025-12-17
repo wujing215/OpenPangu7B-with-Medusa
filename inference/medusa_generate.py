@@ -25,6 +25,7 @@ sys.path.insert(0, str(parent_dir))
 # 导入 Medusa 模型（已集成 Pangu 支持）
 from medusa_model import MedusaModel, MedusaConfig
 from medusa_choices import pangu_stage2
+from medusa_choices import pangu_5heads_top10
 from transformers import AutoTokenizer, AutoConfig
 from safetensors.torch import load_file
 
@@ -187,9 +188,9 @@ class MedusaPanguInference:
         Returns:
             生成的文本，或流式生成器
         """
-        # 使用 pangu_stage2 作为默认配置（适合 3 个 Medusa heads）
+        # 使用 pangu_5heads_top10 作为默认配置（适合 5 个 Medusa heads）
         if medusa_choices is None:
-            medusa_choices = pangu_stage2
+            medusa_choices = pangu_5heads_top10
         
         # Tokenize 输入
         input_ids = self.tokenizer.encode(prompt, return_tensors="pt")
@@ -323,7 +324,7 @@ def main():
         tokenizer_path=tokenizer_path,
         device=args.device,
         dtype=torch.float16,
-        medusa_num_heads=3,
+        medusa_num_heads=5,
         medusa_num_layers=1,
     )
 

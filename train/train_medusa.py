@@ -2,6 +2,14 @@ import torch
 import torch.nn as nn
 from transformers import PreTrainedModel, PretrainedConfig, AutoTokenizer
 import os
+import sys
+
+# Add parent directory to Python path (for importing modeling_openpangu_dense)
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+_parent_dir = os.path.dirname(_current_dir)
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
+
 from huggingface_hub import hf_hub_download
 from dataclasses import dataclass, field
 import json
@@ -127,6 +135,16 @@ class MedusaModelWrapper(nn.Module):
         if output_orig:
             return torch.stack(medusa_logits, dim=0), outputs, orig
         return torch.stack(medusa_logits, dim=0)
+    
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        """Enable gradient checkpointing for the base model."""
+        if hasattr(self.base_model, 'gradient_checkpointing_enable'):
+            self.base_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
+    
+    def gradient_checkpointing_disable(self):
+        """Disable gradient checkpointing for the base model."""
+        if hasattr(self.base_model, 'gradient_checkpointing_disable'):
+            self.base_model.gradient_checkpointing_disable()
 
 # --- Trainer Parts ---
 
@@ -237,10 +255,24 @@ def preprocess(sources, tokenizer: transformers.PreTrainedTokenizer) -> Dict:
                 input_ids.extend(ids)
                 labels.extend([IGNORE_TOKEN_ID] * len(ids))
             elif role == 'assistant':
-                text = f"[unused9]助手：{content}[unused10]"
-                ids = tokenizer(text, add_special_tokens=False).input_ids
-                input_ids.extend(ids)
-                labels.extend(ids)
+                # 分开处理前缀和内容，只有内容部分作为 label
+                prefix_text = "[unused9]助手："
+                prefix_ids = tokenizer(prefix_text, add_special_tokens=False).input_ids
+                content_ids = tokenizer(content, add_special_tokens=False).input_ids
+                suffix_text = "[unused10]"
+                suffix_ids = tokenizer(suffix_text, add_special_tokens=False).input_ids
+                
+                # 前缀标记不作为预测目标
+                input_ids.extend(prefix_ids)
+                labels.extend([IGNORE_TOKEN_ID] * len(prefix_ids))
+                
+                # 内容部分作为预测目标
+                input_ids.extend(content_ids)
+                labels.extend(content_ids)
+                
+                # 后缀标记不作为预测目标
+                input_ids.extend(suffix_ids)
+                labels.extend([IGNORE_TOKEN_ID] * len(suffix_ids))
             elif role == 'system':
                 text = f"[unused9]系统：{content}[unused10]"
                 ids = tokenizer(text, add_special_tokens=False).input_ids

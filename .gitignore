@@ -1,6 +1,9 @@
 # Medusa training outputs (keep config but ignore large files)
-test_medusa_mlp*/**/checkpoint-*
-test_medusa_mlp*/**/*.safetensors
+# test_medusa_mlp*/**/checkpoint-*
+# test_medusa_mlp*/**/*.safetensors
+*.safetensors
+medusa_5heads_*
+test_medusa_mlp_._medusa_3_lr_0.001_layers_1/*
 
 # Python cache
 __pycache__/
@@ -9,3 +12,10 @@ __pycache__/
 # Logs and process files
 *.log
 *.pid
+*.md
+
+# testing files
+test/*
+deepspeed_lowmem.json
+gen_self_distill_data.py
+run_parallel_distill.sh
