@@ -69,10 +69,10 @@ def generate_response(prompt_text, timeout=TIMEOUT_SECONDS):
         generated_ids = outputs.sequences[0, input_length:]
         output_sent = tokenizer.decode(generated_ids, skip_special_tokens=False)
         
-        # 🔥 修复：保留完整输出，包括 [unused16]...[unused17]...[unused10]
+        # 保留完整输出，包括 [unused16]...[unused17]...[unused10]
         # 模型生成格式: [unused16]<thinking>[unused17]<response>[unused10]
         # 
-        # 重要：保留 [unused10] (EOS)，因为：
+        # [unused10](EOS)也要保留
         # 1. Medusa heads 需要学会预测何时结束生成
         # 2. train_medusa.py 不会额外添加 [unused10]
         return output_sent.strip()
