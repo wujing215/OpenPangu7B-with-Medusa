@@ -255,24 +255,31 @@ def preprocess(sources, tokenizer: transformers.PreTrainedTokenizer) -> Dict:
                 input_ids.extend(ids)
                 labels.extend([IGNORE_TOKEN_ID] * len(ids))
             elif role == 'assistant':
-                # 分开处理前缀和内容，只有内容部分作为 label
+                # 🔥 OpenPangu 模型生成格式分析：
+                # 输入: [unused9]助手：  <-- 由 apply_chat_template 生成，是输入的一部分
+                # 生成: [unused16]<thinking>[unused17]<response>[unused10]
+                #
+                # 因此：
+                # - [unused9]助手： 是输入前缀，不作为预测目标
+                # - content 应该是完整的生成内容: [unused16]...[unused17]...[unused10]
+                # - 整个 content 都作为预测目标
+                
                 prefix_text = "[unused9]助手："
                 prefix_ids = tokenizer(prefix_text, add_special_tokens=False).input_ids
-                content_ids = tokenizer(content, add_special_tokens=False).input_ids
-                suffix_text = "[unused10]"
-                suffix_ids = tokenizer(suffix_text, add_special_tokens=False).input_ids
                 
-                # 前缀标记不作为预测目标
+                # 前缀标记 [unused9]助手： 不作为预测目标（它是输入的一部分）
                 input_ids.extend(prefix_ids)
                 labels.extend([IGNORE_TOKEN_ID] * len(prefix_ids))
                 
-                # 内容部分作为预测目标
+                # content 应该是模型生成的完整内容: [unused16]<thinking>[unused17]<response>[unused10]
+                # 如果自蒸馏数据正确保存，content 已包含这些特殊标记
+                content_ids = tokenizer(content, add_special_tokens=False).input_ids
                 input_ids.extend(content_ids)
-                labels.extend(content_ids)
+                labels.extend(content_ids)  # 整个内容都是预测目标
                 
-                # 后缀标记不作为预测目标
-                input_ids.extend(suffix_ids)
-                labels.extend([IGNORE_TOKEN_ID] * len(suffix_ids))
+                # 注意：不再额外添加 [unused10]，因为：
+                # 1. 如果 content 已包含 [unused10]（来自正确的自蒸馏数据），则已经包含
+                # 2. 如果 content 不包含 [unused10]（旧数据），则不添加，避免重复
             elif role == 'system':
                 text = f"[unused9]系统：{content}[unused10]"
                 ids = tokenizer(text, add_special_tokens=False).input_ids

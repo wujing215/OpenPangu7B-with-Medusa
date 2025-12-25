@@ -69,13 +69,13 @@ def generate_response(prompt_text, timeout=TIMEOUT_SECONDS):
         generated_ids = outputs.sequences[0, input_length:]
         output_sent = tokenizer.decode(generated_ids, skip_special_tokens=False)
         
-        # 解析 OpenPangu 格式
-        try:
-            thinking_content = output_sent.split("[unused17]")[0].split("[unused16]")[-1].strip()
-            content = output_sent.split("[unused17]")[-1].split("[unused10]")[0].strip()
-            return content if content else output_sent
-        except:
-            return tokenizer.decode(generated_ids, skip_special_tokens=True)
+        # 🔥 修复：保留完整输出，包括 [unused16]...[unused17]...[unused10]
+        # 模型生成格式: [unused16]<thinking>[unused17]<response>[unused10]
+        # 
+        # 重要：保留 [unused10] (EOS)，因为：
+        # 1. Medusa heads 需要学会预测何时结束生成
+        # 2. train_medusa.py 不会额外添加 [unused10]
+        return output_sent.strip()
     
     except Exception as e:
         print(f"\n❌ Generation error: {e}")
