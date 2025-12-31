@@ -455,6 +455,9 @@ class MedusaModelABC(nn.Module):
                 logits, candidates, temperature, posterior_threshold, posterior_alpha, top_p=top_p, sampling = sampling, fast = fast
             )'''
 
+            # [MODIFIED] Force accept
+            # best_candidate, accept_length = 0, 2
+
             # Update the input_ids and logits
             input_ids, logits, medusa_logits, new_token = update_inference_inputs(
                 input_ids,
@@ -479,6 +482,7 @@ class MedusaModelABC(nn.Module):
                 )
             }
 
+            # [Modified] Force accept
             if self.tokenizer.eos_token_id in input_ids[0, input_len:]:
                 break
 

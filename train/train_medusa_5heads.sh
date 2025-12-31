@@ -3,9 +3,9 @@
 
 # ================= 配置 =================
 MODEL_PATH=".."  # OpenPangu 模型路径(相对于train目录)
-TRAIN_DATA="../pangu_distilled_10k.json"  # 自蒸馏数据(在根目录)
-OUTPUT_DIR="../medusa_5heads_lr0.001_layers1"  # 输出到根目录
-NUM_HEADS=5  # 论文推荐 5 个 heads
+TRAIN_DATA="../pangu_distilled_10k.json"  # 自蒸馏数据目录
+OUTPUT_DIR="../medusa_5heads_layers1"  # Medusa heads权重输出目录
+NUM_HEADS=5  # 5 个 heads
 NUM_LAYERS=1  # 每个 head 的层数
 
 # 训练参数
@@ -15,8 +15,8 @@ NUM_EPOCHS=5
 LEARNING_RATE=1e-3
 SAVE_STEPS=1000
 
-# GPU 设置 (使用2个GPU)
-export CUDA_VISIBLE_DEVICES=2,5
+# GPU 设置 (使用4个GPU)
+export CUDA_VISIBLE_DEVICES=0, 1, 2, 3
 
 # ================= 训练 =================
 echo "========================================"
@@ -31,7 +31,7 @@ echo "========================================"
 # 切换到 train 目录
 cd "$(dirname "$0")"
 
-nohup torchrun --nproc_per_node=2 --master_port=29501 train_medusa.py \
+nohup torchrun --nproc_per_node=4 --master_port=29501 train_medusa.py \ 
     --model_name_or_path "$MODEL_PATH" \
     --data_path "$TRAIN_DATA" \
     --bf16 True \
@@ -49,13 +49,14 @@ nohup torchrun --nproc_per_node=2 --master_port=29501 train_medusa.py \
     --warmup_ratio 0.1 \
     --lr_scheduler_type "cosine" \
     --logging_steps 10 \
-    --model_max_length 2048 \
+    --tf32 True \
+    --model_max_length 512 \
     --gradient_checkpointing True \
     --lazy_preprocess True \
     --medusa_num_heads $NUM_HEADS \
     --medusa_num_layers $NUM_LAYERS \
     --deepspeed ../deepspeed.json \
-    --report_to none > ../1210_train.log 2>&1 & echo $! > ../1210_train.pid
+    --report_to none > ../1231_train.log 2>&1 & echo $! > ../1231_train.pid
 
 echo "========================================"
 echo "Training completed!"
