@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import sys
 import os
+import time
+import numpy as np
 
 # 使用兼容层初始化 Medusa（处理 transformers 版本兼容性）
 _current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -29,6 +31,23 @@ from huggingface_hub import hf_hub_download
 import warnings
 
 
+try:
+    import torch_npu
+    from torch_npu.contrib import transfer_to_npu
+    DEVICE_TYPE = "npu"
+    DEVICE_TAG = "昇腾 (Ascend NPU)"
+    print(f"[Info] 检测到 torch_npu，Profiling 将在昇腾 NPU 上运行。")
+except ImportError:
+    DEVICE_TYPE = "cuda" if torch.cuda.is_available() else "cpu"
+    DEVICE_TAG = "NVIDIA CUDA" if DEVICE_TYPE == "cuda" else "CPU"
+    print(f"[Warning] 未检测到 torch_npu，Profiling 将在 {DEVICE_TAG} 上运行。")
+
+def device_synchronize():
+    """跨平台设备同步函数"""
+    if DEVICE_TYPE == 'npu':
+        torch.npu.synchronize()
+    elif DEVICE_TYPE == 'cuda':
+        torch.cuda.synchronize()
 
 def evaluate_posterior_test(
     logits, candidates, temperature, posterior_threshold=0.3, posterior_alpha=0.09, top_p=0.8, sampling='typical', fast=True
@@ -326,6 +345,8 @@ class MedusaModelABC(nn.Module):
         if output_orig:
             return torch.stack(medusa_logits, dim=0), outputs, orig
         return torch.stack(medusa_logits, dim=0)
+
+
     def get_medusa_choice(self, model_name):
         if 'vicuna' in model_name:
             if '7b' in model_name:
@@ -355,7 +376,8 @@ class MedusaModelABC(nn.Module):
         posterior_alpha=0.3,
         top_p=0.8, 
         sampling = 'typical', 
-        fast = True
+        fast = True,
+        profile=False,
     ):
         """
         Args:
@@ -373,6 +395,15 @@ class MedusaModelABC(nn.Module):
 
         Warning: Only support batch size 1 for now!!
         """
+
+        # 性能测试分支
+        if profile:
+            yield from self._medusa_generate_benchmark(
+                input_ids, attention_mask, temperature, max_steps, medusa_choices,
+                posterior_threshold, posterior_alpha, top_p, sampling, fast
+            )
+            return
+
         assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
         # Avoid modifying the input_ids in-place
         input_ids = input_ids.clone()
@@ -419,6 +450,7 @@ class MedusaModelABC(nn.Module):
             input_ids, self, medusa_buffers["medusa_attn_mask"], past_key_values
         )
 
+        accm_token = 0
         new_token = 0
         last_round_token = 0
 
@@ -451,12 +483,6 @@ class MedusaModelABC(nn.Module):
             best_candidate, accept_length = evaluate_posterior(
                 logits, candidates, temperature, posterior_threshold, posterior_alpha, top_p=top_p, sampling=sampling, fast=fast
             )
-            '''best_candidate, accept_length = evaluate_posterior_test(
-                logits, candidates, temperature, posterior_threshold, posterior_alpha, top_p=top_p, sampling = sampling, fast = fast
-            )'''
-
-            # [MODIFIED] Force accept
-            # best_candidate, accept_length = 0, 2
 
             # Update the input_ids and logits
             input_ids, logits, medusa_logits, new_token = update_inference_inputs(
@@ -473,18 +499,217 @@ class MedusaModelABC(nn.Module):
                 current_length_data,
             )
 
+            accm_token += accept_length
             yield {
                 "text": self.tokenizer.decode(
                     input_ids[0, input_len:],
                     skip_special_tokens=True,
                     spaces_between_special_tokens=False,
                     clean_up_tokenization_spaces=True,
-                )
+                ),
+                "new_token": new_token,
+                "accm_token": accm_token,
+                "idx": idx,
             }
 
-            # [Modified] Force accept
-            if self.tokenizer.eos_token_id in input_ids[0, input_len:]:
+            if self.tokenizer.eos_token_id in input_ids[0, input_len:] or new_token >= max_steps:
                 break
+
+    def _medusa_generate_benchmark(
+        self,
+        input_ids,
+        attention_mask=None,
+        temperature=0.0,
+        max_steps=512,
+        medusa_choices=None,
+        posterior_threshold=0.09,
+        posterior_alpha=0.3,
+        top_p=0.8,
+        sampling='typical',
+        fast=True,
+    ):
+        """
+        [Profiling 专用函数] 包含详细计时、同步和 Kernel Trace 导出功能。
+        """
+        import time
+        import numpy as np
+
+        assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
+        input_ids = input_ids.clone()
+        
+        # --- 初始化与 Prefill ---
+        if medusa_choices is None:
+            medusa_choices = self.get_medusa_choice(self.base_model_name_or_path)
+        
+        if hasattr(self, "medusa_choices") and self.medusa_choices == medusa_choices:
+            medusa_buffers = self.medusa_buffers
+        else:
+            medusa_buffers = generate_medusa_buffers(medusa_choices, device=self.base_model.device)
+            self.medusa_buffers, self.medusa_choices = medusa_buffers, medusa_choices
+
+        if hasattr(self, "past_key_values"):
+            past_key_values = self.past_key_values
+            past_key_values_data, current_length_data = self.past_key_values_data, self.current_length_data
+            current_length_data.zero_()
+        else:
+            past_key_values, past_key_values_data, current_length_data = initialize_past_key_values(self.base_model)
+            self.past_key_values, self.past_key_values_data, self.current_length_data = past_key_values, past_key_values_data, current_length_data
+
+        input_len = input_ids.shape[1]
+        reset_medusa_mode(self)
+        medusa_logits, logits = initialize_medusa(input_ids, self, medusa_buffers["medusa_attn_mask"], past_key_values)
+
+        # Profiling 变量
+        target_profile_steps = [1, 66, 67, 68, 69, 100] # 手动设置需要开启 profiler 的 step
+        target_profile_steps = []
+        metrics = {"draft": [], "verify": [], "eval": [], "update": [], "total": []}
+        accm_token, new_token = 0, 0
+        
+        device_synchronize()
+        print(f"\n[Profiling Mode] Device: {DEVICE_TAG} | Max Steps: {max_steps}")
+
+        for idx in range(max_steps):
+            step_start = time.time()
+
+            # 1. Draft
+            candidates, tree_candidates = generate_candidates(
+                medusa_logits, logits, medusa_buffers["tree_indices"],
+                medusa_buffers["retrieve_indices"], temperature=temperature,
+                posterior_alpha=posterior_alpha, posterior_threshold=posterior_threshold,
+                top_p=top_p, sampling=sampling, fast=fast,
+            )
+            device_synchronize()
+            t1 = time.time()
+            metrics["draft"].append((t1 - step_start) * 1000)
+
+            # 2. Verify (含 Profiler 钩子)
+            enable_kernel_profiling = (idx in target_profile_steps)
+            prof = None
+            if enable_kernel_profiling:
+                if DEVICE_TYPE == "cuda": 
+                    activities = [torch.profiler.ProfilerActivity.CPU]
+                    activities.append(torch.profiler.ProfilerActivity.CUDA)
+                    prof = torch.profiler.profile(activities=activities, record_shapes=True, with_stack=True)
+                elif DEVICE_TYPE == "npu": 
+                    experimental_config = torch_npu.profiler._ExperimentalConfig(
+                        export_type=torch_npu.profiler.ExportType.Text,
+                        profiler_level=torch_npu.profiler.ProfilerLevel.Level0,
+                        aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
+                    )
+                    
+                    prof = torch_npu.profiler.profile(
+                        activities=[
+                            torch_npu.profiler.ProfilerActivity.CPU,
+                            torch_npu.profiler.ProfilerActivity.NPU
+                        ],
+                        schedule=None, # 注意：设置为 None，开启手动模式
+                        on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./result/medusa_steps"),
+                        record_shapes=True,
+                        with_stack=True,
+                        experimental_config=experimental_config
+                    )
+                prof.__enter__()
+
+            medusa_logits, logits, outputs = tree_decoding(
+                self, tree_candidates, past_key_values,
+                medusa_buffers["medusa_position_ids"], input_ids,
+                medusa_buffers["retrieve_indices"],
+            )
+
+            if enable_kernel_profiling and prof:
+                prof.__exit__(None, None, None)
+                prof.export_chrome_trace(f"trace_step_{idx}.json")
+                print(f" -> Trace saved for step {idx}")
+
+            device_synchronize()
+            t2 = time.time()
+            metrics["verify"].append((t2 - t1) * 1000)
+
+            # 3. Eval
+            best_candidate, accept_length = evaluate_posterior(
+                logits, candidates, temperature, posterior_threshold, 
+                posterior_alpha, top_p=top_p, sampling=sampling, fast=fast
+            )
+            device_synchronize()
+            t3 = time.time()
+            metrics["eval"].append((t3 - t2) * 1000)
+
+            # force accept
+            best_candidate, accept_length = 0, 2
+
+            # 4. Update
+            input_ids, logits, medusa_logits, new_token = update_inference_inputs(
+                input_ids, candidates, best_candidate, accept_length,
+                medusa_buffers["retrieve_indices"], outputs, logits,
+                medusa_logits, new_token, past_key_values_data, current_length_data,
+            )
+            device_synchronize()
+            t4 = time.time()
+            metrics["update"].append((t4 - t3) * 1000)
+            metrics["total"].append((t4 - step_start) * 1000)
+
+            # 取出当前步（最后一次添加）的指标
+            curr_total = metrics["total"][-1]
+            curr_verify = metrics["verify"][-1]
+            curr_update = metrics["update"][-1]
+            
+            if idx < 100 or idx % 100 == 0:
+                print(f"Step {idx:04d} | Total: {curr_total:6.2f}ms | Verify: {curr_verify:6.2f}ms | Update: {curr_update:6.2f}ms")
+
+            accm_token += accept_length
+            # ====== profile 时 throughput 数据是有问题的
+            output_dict = {
+                "text": self.tokenizer.decode(input_ids[0, input_len:], skip_special_tokens=True),
+                "new_token": new_token, "accm_token": accm_token, "idx": idx,
+            }
+            yield output_dict
+
+            if new_token >= max_steps:
+                break
+            
+            
+        # 打印报表
+        print("\n" + "="*100)
+        print(f"{'PROFILING SUMMARY':^100}")
+        print("="*100)
+        # 格式化表头：指标 | 全局均值 | 前20步均值 | 后20步均值 | 变化幅度(负数代表变快)
+        header = f"{'Metric':<12} | {'Avg (All)':<12} | {'Avg (First 20)':<16} | {'Avg (Last 20)':<16} | {'Change':<10}"
+        print(header)
+        print("-" * 100)
+
+        for key, vals in metrics.items():
+            if len(vals) == 0:
+                continue
+            
+            vals_arr = np.array(vals)
+            avg_all = np.mean(vals_arr)
+            max_val = np.max(vals_arr)
+
+            # 计算分段均值
+            if len(vals) >= 40:
+                avg_first_20 = np.mean(vals_arr[:20])
+                avg_last_20 = np.mean(vals_arr[-20:])
+                # 计算变化率：((后 - 前) / 前) * 100
+                # 如果时间变少（变快），这里是负数
+                diff_pct = ((avg_last_20 - avg_first_20) / avg_first_20) * 100
+                change_str = f"{diff_pct:+.2f}%"
+            else:
+                # 步数不足时的处理
+                avg_first_20 = avg_all
+                avg_last_20 = avg_all
+                change_str = "N/A"
+
+            print(f"{key:<12} | {avg_all:6.2f}ms    | {avg_first_20:6.2f}ms         | {avg_last_20:6.2f}ms         | {change_str}")
+        
+        print("="*100)
+        # 额外打印吞吐量估算
+        if len(metrics["total"]) > 0:
+            avg_latency = np.mean(metrics["total"])
+            # 这里的 accm_token 是总生成的 token 数 (medusa accept + base)
+            # 注意：profile 模式下 medusa 的逻辑为了测速通常会 force accept 或者由外部 benchmark.py 控制
+            # 这里简单估算 tokens/s
+            print(f"Approx Latency: {avg_latency:.2f} ms/step")
+        print("="*100)
 
 
 class MedusaModelLlama(MedusaModelABC, KVLlamaForCausalLM):

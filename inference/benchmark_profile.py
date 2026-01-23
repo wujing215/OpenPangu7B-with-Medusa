@@ -65,7 +65,7 @@ def print_acceptance_info(model_path, is_parallel=False):
 # 添加父目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-def benchmark_baseline(model_path, prompt, max_new_tokens, num_runs=3, warmup_runs=1, profile=False):
+def benchmark_baseline(model_path, prompt, max_new_tokens, num_runs=3, warmup_runs=1, profile=True):
     """
     测试原始模型（无 Medusa）的逐步性能
     Args:
@@ -95,16 +95,7 @@ def benchmark_baseline(model_path, prompt, max_new_tokens, num_runs=3, warmup_ru
     # 打印验收信息
     print_acceptance_info(model_path, is_parallel=False)
     
-    # 2. 准备输入
-    messages = [
-        {"role": "system", "content": "你是一个有帮助的助手。"},
-        {"role": "user", "content": prompt},
-    ]
-    formatted_prompt = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    
-    input_ids = tokenizer.encode(formatted_prompt, return_tensors="pt").to(target_device)
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(target_device)
     input_len = input_ids.shape[1]
     print(f"Prompt Length: {input_len}")
     
@@ -115,10 +106,9 @@ def benchmark_baseline(model_path, prompt, max_new_tokens, num_runs=3, warmup_ru
     print(f"\nWarmup ({warmup_runs} runs)...")
     for _ in range(warmup_runs):
         with torch.no_grad():
-            # 使用简单的 generate 做 warmup 即可
             _ = model.generate(
                 input_ids,
-                max_new_tokens=10, # 稍微跑一点即可
+                max_new_tokens=100, # 稍微跑一点即可
                 do_sample=False,
                 eos_token_id=eos_token_id,
                 use_cache=True
@@ -190,11 +180,11 @@ def benchmark_baseline(model_path, prompt, max_new_tokens, num_runs=3, warmup_ru
                     if step % 50 == 0:
                     # if step % 1 == 0:
                         print(f"Step {step:04d} | Total: {elapsed_ms:.2f}ms")
-
+                    
                 curr_step += 1
                 
-                # if next_token.item() == eos_token_id:
-                #     break
+                if not profile and next_token.item() == eos_token_id:
+                    break
 
         if profile: device_synchronize()
         end_time = time.time()
@@ -235,11 +225,10 @@ def benchmark_baseline(model_path, prompt, max_new_tokens, num_runs=3, warmup_ru
     return results
 
 
-def benchmark_medusa(model_path, medusa_dir, prompt, max_new_tokens, num_runs=3, warmup_runs=1):
+def benchmark_medusa(model_path, medusa_dir, prompt, max_new_tokens, num_runs=3, warmup_runs=1, profile=False):
     """测试 Medusa 模型（投机解码）"""
     from medusa_generate import MedusaPanguInference
     from medusa_choices import pangu_stage2
-    from medusa_choices import pangu_5heads_0109
     
     print("\n" + "=" * 60)
     print(f"Medusa: OpenPangu + Medusa Heads (Speculative Decoding) on {DEVICE_TAG}")
@@ -261,11 +250,14 @@ def benchmark_medusa(model_path, medusa_dir, prompt, max_new_tokens, num_runs=3,
     print_acceptance_info(model_path, is_parallel=True)
     
     # 准备输入
-    messages = [
-        {"role": "system", "content": "你是一个有帮助的助手。"},
-        {"role": "user", "content": prompt},
-    ]
-    formatted_prompt = model.apply_chat_template(messages)
+    # messages = [
+    #     {"role": "system", "content": "你是一个有帮助的助手。"},
+    #     {"role": "user", "content": prompt},
+    # ]
+    # formatted_prompt = model.apply_chat_template(messages)
+    # print(f"Prompt: {formatted_prompt}")
+    formatted_prompt = prompt
+
     # 适配 NPU
     input_ids = model.tokenizer.encode(formatted_prompt, return_tensors="pt").to(target_device)
     input_len = input_ids.shape[1]
@@ -292,7 +284,8 @@ def benchmark_medusa(model_path, medusa_dir, prompt, max_new_tokens, num_runs=3,
             formatted_prompt, 
             max_steps=max_new_tokens, 
             temperature=0.0,
-            medusa_choices=pangu_5heads_0109,
+            profile=profile
+            # medusa_choices=pangu_stage2,
         )
         
         device_synchronize() # 适配 NPU 同步
@@ -341,11 +334,13 @@ def main():
     parser.add_argument("--base_model", type=str, default="/root/openPangu-Embedded-7B-V1.1",
                         help="Base model path")
     parser.add_argument("--medusa_dir", type=str, 
-                        default="/root/OpenPangu7B-on-NVIDIA/test_medusa_mlp_._medusa_3_lr_0.001_layers_1",
+                        default="/root/OpenPangu7B-with-Medusa/medusa_5heads_layers1_1231_medusa_mlp_openPangu-Embedded-7B-V1.1_medusa_5_lr_0.001_layers_1/",
                         help="Medusa head directory")
     parser.add_argument("--prompt", type=str, 
-                        default="请详细介绍一下大语言模型的工作原理。",
-                        help="Test prompt")
+                        default="Write an immersive, long-form science fiction narrative about a galactic 'Silk Road' that connects the far reaches of the universe. Focus on building a vivid world that showcases advanced speculative technology, breathtaking alien environments, and the complex socio-economic trade between multiple non-human civilizations. Develop a multi-layered plot with rich character interactions and descriptive world-building, ensuring a substantial length.",
+                        help="The input prompt for non-profile mode")
+    parser.add_argument("--prompt_len", type=int, default=512,
+                        help="Length of the input prompt (number of tokens)")
     parser.add_argument("--max_tokens", type=int, default=256,
                         help="Maximum new tokens to generate")
     parser.add_argument("--num_runs", type=int, default=3,
@@ -356,6 +351,8 @@ def main():
                         help="Only run baseline benchmark")
     parser.add_argument("--medusa_only", action="store_true",
                         help="Only run Medusa benchmark")
+    parser.add_argument("--profile", action="store_true",
+                        help="run with profile mode")
     args = parser.parse_args()
     
     # 解析路径
@@ -367,20 +364,33 @@ def main():
     print("=" * 60)
     print(f"Base model: {base_model_path}")
     print(f"Medusa dir: {medusa_dir}")
-    print(f"Prompt: {args.prompt[:50]}...")
-    print(f"Max tokens: {args.max_tokens}")
+    print(f"Prompt Length: {args.prompt_len} tokens") # 显示长度
+    print(f"Decode step: {args.max_tokens}")
     print(f"Runs: {args.num_runs} (+ {args.warmup} warmup)")
     
+
+    if args.profile:
+        # Profile 模式：生成指定长度的随机 Prompt (用于压测性能，不考虑语义)
+        tokenizer = AutoTokenizer.from_pretrained(base_model_path, trust_remote_code=True)
+        print(f"[{DEVICE_TAG}] Profile mode: Generating a random prompt of {args.prompt_len} tokens...")
+        vocab_range = range(100, tokenizer.vocab_size - 10) 
+        random_token_ids = random.choices(vocab_range, k=args.prompt_len)
+        generated_prompt = tokenizer.decode(random_token_ids, skip_special_tokens=True)
+    else:
+        # 正常模式：使用 --prompt 传入的文本
+        print(f"[{DEVICE_TAG}] Normal mode: Using provided prompt.")
+        generated_prompt = args.prompt
     results = {}
     
     # Baseline benchmark
     if not args.medusa_only:
         results["baseline"] = benchmark_baseline(
             base_model_path, 
-            args.prompt, 
+            generated_prompt, 
             args.max_tokens,
             args.num_runs,
             args.warmup,
+            args.profile
         )
     
     # Medusa benchmark
@@ -388,10 +398,11 @@ def main():
         results["medusa"] = benchmark_medusa(
             base_model_path,
             medusa_dir,
-            args.prompt,
+            generated_prompt,
             args.max_tokens,
             args.num_runs,
             args.warmup,
+            args.profile
         )
     
     # 对比结果

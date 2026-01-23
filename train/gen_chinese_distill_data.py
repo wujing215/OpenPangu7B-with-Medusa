@@ -15,9 +15,13 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from pathlib import Path
 import random
+import time
+
+# ================= 配置 =================
+TIMEOUT_SECONDS = 60  # 单个样本超时时间
 
 # ================= 中文 Prompt 模板 =================
-# 这些是多样化的中文提示词，涵盖各种主题和风格
+# 中文提示词，涵盖各种主题和风格
 CHINESE_PROMPTS = [
     # 知识问答类
     "请详细介绍一下人工智能的发展历史。",
@@ -241,8 +245,8 @@ BATCH_SIZE = 1
 tokenizer = None
 model = None
 
-def generate_response(prompt_text):
-    """使用 OpenPangu 原模型生成回复（自蒸馏）"""
+def generate_response(prompt_text, timeout=TIMEOUT_SECONDS):
+    """使用 OpenPangu 原模型生成回复（自蒸馏）+ 超时保护"""
     messages = [
         {"role": "system", "content": "你是一个有帮助的助手。"},
         {"role": "user", "content": prompt_text}
@@ -256,22 +260,39 @@ def generate_response(prompt_text):
     
     inputs = tokenizer(formatted_text, return_tensors="pt").to(DEVICE)
     
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs, 
-            max_new_tokens=MAX_NEW_TOKENS, 
-            do_sample=False,  # 贪婪解码
-            eos_token_id=45892,  # OpenPangu 的 EOS token
-            return_dict_in_generate=True
-        )
+    start_time = time.time()
     
-    input_length = inputs.input_ids.shape[1]
-    generated_ids = outputs.sequences[0, input_length:]
-    output_sent = tokenizer.decode(generated_ids, skip_special_tokens=False)
+    try:
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs, 
+                max_new_tokens=MAX_NEW_TOKENS, 
+                do_sample=False,  # 贪婪解码
+                eos_token_id=45892,  # OpenPangu 的 EOS token
+                return_dict_in_generate=True
+            )
+        
+        # 检查是否超时
+        elapsed = time.time() - start_time
+        if elapsed > timeout:
+            print(f"\n  Generation timeout ({elapsed:.1f}s), skipping...")
+            return None
+        
+        input_length = inputs.input_ids.shape[1]
+        generated_ids = outputs.sequences[0, input_length:]
+        output_sent = tokenizer.decode(generated_ids, skip_special_tokens=False)
+        
+        # 保留完整输出，包括 [unused16]...[unused17]...[unused10]
+        # 模型生成格式: [unused16]<thinking>[unused17]<response>[unused10]
+        # 
+        # [unused10](EOS)也要保留
+        # 1. Medusa heads 需要学会预测何时结束生成
+        # 2. train_medusa.py 不会额外添加 [unused10]
+        return output_sent.strip()
     
-    # 返回完整输出（包含 thinking 和 content）
-    # 因为 Medusa 需要学习整个输出序列
-    return output_sent
+    except Exception as e:
+        print(f"\n Generation error: {e}")
+        return None
 
 def main():
     global MODEL_PATH, OUTPUT_DATA, NUM_SAMPLES, MAX_NEW_TOKENS, DEVICE, tokenizer, model
@@ -314,6 +335,11 @@ def main():
         try:
             response = generate_response(prompt)
             
+            # 检查回复是否有效
+            if response is None:
+                failed_count += 1
+                continue
+            
             # 检查回复长度
             if len(response) < 10:
                 failed_count += 1
@@ -328,14 +354,14 @@ def main():
                 ]
             })
             
-            # 每 100 条保存一次
-            if (idx + 1) % 100 == 0:
+            # 每 50 条保存一次（更频繁）
+            if len(results) % 50 == 0 and len(results) > 0:
                 with open(OUTPUT_DATA, 'w', encoding='utf-8') as f:
                     json.dump(results, f, ensure_ascii=False, indent=2)
-                print(f"\nSaved {len(results)} samples, failed: {failed_count}")
+                print(f"\n Checkpoint: Saved {len(results)} samples (failed: {failed_count})")
                 
         except Exception as e:
-            print(f"\nError at index {idx}: {e}")
+            print(f"\n Error at index {idx}: {e}")
             failed_count += 1
             continue
     

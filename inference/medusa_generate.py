@@ -169,6 +169,7 @@ class MedusaPanguInference:
         sampling: str = 'typical',
         fast: bool = True,
         stream: bool = False,
+        profile: bool = False,
     ):
         """
         使用 Medusa 投机解码生成文本
@@ -207,6 +208,7 @@ class MedusaPanguInference:
             top_p=top_p,
             sampling=sampling,
             fast=fast,
+            profile=profile,
         )
         
         if stream:
@@ -217,6 +219,12 @@ class MedusaPanguInference:
             final_text = ""
             for output in generator:
                 final_text = output["text"]
+            
+            # import pdb; 
+            total_decode = float(output['new_token'])
+            decode_step = float(output['idx'])
+            
+            print(f"Total decode: {total_decode} tokens in {decode_step} steps, accept rate: {total_decode / decode_step:.2f}%")
             return final_text
     
     def _stream_generate(self, generator):

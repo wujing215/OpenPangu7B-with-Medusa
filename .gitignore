@@ -4,6 +4,7 @@
 *.safetensors
 medusa_5heads_*
 test_medusa_mlp_._medusa_3_lr_0.001_layers_1/*
+medusa_heads_5/*
 
 # Python cache
 __pycache__/
@@ -13,6 +14,8 @@ __pycache__/
 *.log
 *.pid
 *.md
+trace*
+log/*
 
 # testing files
 test/*

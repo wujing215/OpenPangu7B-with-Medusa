@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-Medusa Tree 构建工具 - 基于贪婪搜索优化 medusa_choices
+Medusa Tree 构建工具 - 优化版本（快速）
+
+优化点：
+1. 单次 forward pass 收集所有 head 的统计信息（不逐 token 生成）
+2. 使用已有的 ground truth 数据（从蒸馏数据集）
+3. 并行计算多个位置的统计
 
 原理：
-1. 对验证集样本，用训练好的 Medusa 模型生成
-2. 记录每个 head 的 Top-K token 概率
-3. 使用贪婪算法构建最优树结构（最大化接受率）
+1. 对验证集样本，直接用完整的 input+output 做一次 forward
+2. 对每个位置，检查 Medusa head 的预测是否匹配下一个 token
+3. 使用贪婪算法构建最优树结构
 
 参考论文：Medusa: Simple LLM Inference Acceleration Framework
 """
@@ -27,8 +32,8 @@ from medusa_model import MedusaModelPangu
 from transformers import AutoTokenizer
 
 
-class MedusaTreeBuilder:
-    """构建最优 Medusa Tree"""
+class MedusaTreeBuilderFast:
+    """构建最优 Medusa Tree - 优化版本"""
     
     def __init__(self, model_path: str, medusa_head_path: str, num_heads: int, 
                  device: str = "cuda:0", top_k: int = 10):
@@ -51,7 +56,6 @@ class MedusaTreeBuilder:
         
         # 加载基础模型配置并添加 medusa 参数
         from transformers import AutoConfig
-        from medusa_model import MedusaConfig
         
         config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         config.medusa_num_heads = num_heads
@@ -85,136 +89,272 @@ class MedusaTreeBuilder:
         self.model.eval()
         
         print("Model loaded successfully!")
+    
+    def collect_statistics_fast(self, data: List[Dict], max_samples: int = 1000, 
+                                 max_seq_len: int = 2048) -> Dict:
+        """
+        快速收集 Medusa heads 的预测统计
         
-    def collect_statistics(self, prompts: List[str], max_new_tokens: int = 256) -> Dict:
-        """收集 Medusa heads 的预测统计"""
+        核心优化：对每个样本只做一次 forward pass，同时评估所有位置的预测
+        """
         stats = {
             'head_accuracy': [[] for _ in range(self.num_heads)],  # 每个 head 的准确率
             'head_top_k_hit': [[] for _ in range(self.num_heads)],  # Top-K 命中率
-            'position_patterns': defaultdict(lambda: defaultdict(int)),  # 位置模式
+            'joint_accuracy': defaultdict(list),  # 多 head 联合准确率
         }
         
-        print(f"Collecting statistics on {len(prompts)} prompts...")
+        print(f"Collecting statistics on {min(len(data), max_samples)} samples (fast mode)...")
         
-        for prompt in tqdm(prompts):
-            # 准备输入
-            messages = [
-                {"role": "system", "content": "你是一个有帮助的助手。"},
-                {"role": "user", "content": prompt}
-            ]
-            text = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-            input_ids = self.tokenizer.encode(text, return_tensors="pt").to(self.device)
-            
-            with torch.no_grad():
-                # 贪婪解码，记录每步的 ground truth
-                outputs = self.model.base_model.generate(
-                    input_ids,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=False,
-                    eos_token_id=45892,
-                    output_scores=True,
-                    return_dict_in_generate=True,
+        processed = 0
+        for item in tqdm(data[:max_samples]):
+            try:
+                # 从蒸馏数据中提取 prompt 和 response
+                if "conversations" in item:
+                    prompt = ""
+                    response = ""
+                    for conv in item["conversations"]:
+                        if conv.get("from") == "human":
+                            prompt = conv["value"]
+                        elif conv.get("from") == "gpt":
+                            response = conv["value"]
+                    
+                    if not prompt or not response:
+                        continue
+                else:
+                    continue
+                
+                # 构建完整的对话（包含 prompt 和 response）
+                messages = [
+                    {"role": "system", "content": "你是一个有帮助的助手。"},
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": response}
+                ]
+                
+                # Tokenize 完整对话
+                text = self.tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=False
                 )
                 
-                ground_truth_ids = outputs.sequences[0, input_ids.shape[1]:].cpu().tolist()
+                input_ids = self.tokenizer.encode(text, return_tensors="pt", 
+                                                   truncation=True, 
+                                                   max_length=max_seq_len).to(self.device)
                 
-                # 逐步预测，收集 Medusa heads 的表现
-                current_ids = input_ids
-                for step_idx in range(min(len(ground_truth_ids) - self.num_heads, max_new_tokens)):
-                        # Forward pass 获取 Medusa logits
-                    medusa_logits, outputs, _ = self.model(
-                        current_ids, 
+                seq_len = input_ids.shape[1]
+                if seq_len < self.num_heads + 10:  # 太短的序列跳过
+                    continue
+                
+                with torch.no_grad():
+                    # 单次 forward pass 获取所有 Medusa logits
+                    medusa_logits, _, _ = self.model(
+                        input_ids, 
                         output_orig=True, 
                         medusa_forward=True
                     )
                     # medusa_logits shape: [num_heads, batch, seq_len, vocab]
                     
-                    # 检查每个 head 的预测
+                    # 对每个位置,检查 Medusa heads 的预测
+                    # position i 的 head j 预测的是 position i+j+2 的 token (与训练对齐: labels[..., 2+j:])
+                    for pos in range(seq_len - self.num_heads - 2):
+                        for head_idx in range(self.num_heads):
+                            target_pos = pos + head_idx + 2  # 修正：提前 (head_idx+2) 步，与训练一致
+                            if target_pos >= seq_len:
+                                break
+                            
+                            # Ground truth token
+                            gt_token = input_ids[0, target_pos].item()
+                            
+                            # Medusa head 在位置 pos 的预测
+                            head_logits = medusa_logits[head_idx, 0, pos, :]
+                            
+                            # Top-1 准确率
+                            pred_token = head_logits.argmax().item()
+                            is_correct = (pred_token == gt_token)
+                            stats['head_accuracy'][head_idx].append(float(is_correct))
+                            
+                            # Top-K 命中率
+                            top_k_tokens = head_logits.topk(self.top_k).indices.cpu().tolist()
+                            is_in_top_k = (gt_token in top_k_tokens)
+                            stats['head_top_k_hit'][head_idx].append(float(is_in_top_k))
+                
+                processed += 1
+                
+                # 定期打印进度统计
+                if processed % 100 == 0:
+                    print(f"\n  Progress: {processed} samples processed")
                     for head_idx in range(self.num_heads):
-                        # 当前 head 预测的是未来第 (head_idx+1) 个 token
-                        if step_idx + head_idx + 1 >= len(ground_truth_ids):
-                            break
-                        
-                        gt_token = ground_truth_ids[step_idx + head_idx + 1]
-                        head_logits = medusa_logits[head_idx, 0, -1, :]  # 最后一个位置的预测
-                        
-                        # Top-1 准确率
-                        pred_token = head_logits.argmax().item()
-                        is_correct = (pred_token == gt_token)
-                        stats['head_accuracy'][head_idx].append(float(is_correct))
-                        
-                        # Top-K 命中率
-                        top_k_tokens = head_logits.topk(self.top_k).indices.cpu().tolist()
-                        is_in_top_k = (gt_token in top_k_tokens)
-                        stats['head_top_k_hit'][head_idx].append(float(is_in_top_k))
-                    
-                    # 移动到下一个 token
-                    next_token = torch.tensor([[ground_truth_ids[step_idx]]], device=self.device)
-                    current_ids = torch.cat([current_ids, next_token], dim=1)
+                        if stats['head_accuracy'][head_idx]:
+                            acc = np.mean(stats['head_accuracy'][head_idx])
+                            hit = np.mean(stats['head_top_k_hit'][head_idx])
+                            print(f"    Head {head_idx}: Acc={acc:.4f}, Top-{self.top_k}={hit:.4f}")
+                            
+            except Exception as e:
+                print(f"  Warning: Error processing sample: {e}")
+                continue
         
+        print(f"\nTotal samples processed: {processed}")
         return stats
     
     def build_tree_greedy(self, stats: Dict, max_candidates: int = 64) -> List[List[int]]:
-        """基于统计数据贪婪构建最优树
+        """基于统计数据构建最优树（满足前缀属性）
         
-        返回 medusa_choices 格式：[[0], [0, 0], [0, 1], [1], ...]
+        返回 medusa_choices 格式：[[0], [1], [2], [0, 0], [0, 1], [1, 0], ...]
+        
+        关键约束：必须满足前缀属性
+        - 如果 [a, b, c] 在树中，那么 [a] 和 [a, b] 也必须在树中
         """
-        print("\nBuilding Medusa tree greedily...")
+        print("\nBuilding Medusa tree (prefix-preserving)...")
         
-        # 计算每个 head 的平均 Top-K 命中率
-        head_hit_rates = []
+        # 计算每个 head 的平均准确率
+        head_accuracies = []
         for head_idx in range(self.num_heads):
-            hit_rate = np.mean(stats['head_top_k_hit'][head_idx])
-            head_hit_rates.append(hit_rate)
-            print(f"  Head {head_idx}: Top-{self.top_k} hit rate = {hit_rate:.3f}")
+            if stats['head_accuracy'][head_idx]:
+                acc = np.mean(stats['head_accuracy'][head_idx])
+            else:
+                acc = 0.01
+            head_accuracies.append(acc)
+            print(f"  Head {head_idx}: Top-1 Accuracy = {acc:.4f}")
         
-        # 贪婪策略：优先扩展命中率高的 head
+        # 使用贪心算法构建树，确保前缀属性
         medusa_choices = []
         
-        # 第一层：所有 head 的直接预测
-        for head_idx in range(self.num_heads):
-            medusa_choices.append([head_idx])
+        # 路径表示：(路径, 期望命中概率)
+        # 从第一层开始
+        candidate_paths = []
+        for token_idx in range(self.top_k):
+            path = [token_idx]
+            # 第一层的期望准确率 = head 0 的准确率 * token_idx 的衰减因子
+            expected_prob = head_accuracies[0] * (0.85 ** token_idx)
+            candidate_paths.append((path, expected_prob))
         
-        # 逐层扩展
-        current_layer = [[i] for i in range(self.num_heads)]
+        # 按期望概率排序
+        candidate_paths.sort(key=lambda x: x[1], reverse=True)
         
-        while len(medusa_choices) < max_candidates:
-            next_layer = []
+        # 贪心选择第一层的候选
+        candidates_per_head = max(1, max_candidates // (self.num_heads * 2))
+        for path, _ in candidate_paths[:candidates_per_head]:
+            medusa_choices.append(path)
+        
+        # 逐层扩展，确保满足前缀属性
+        current_paths = list(medusa_choices)  # 当前可以被扩展的路径
+        
+        depth = 1
+        while len(medusa_choices) < max_candidates and depth < self.num_heads:
+            new_paths = []
             
-            # 为当前层的每个路径尝试扩展
-            for path in current_layer:
-                last_head = path[-1]
-                
-                # 尝试扩展到下一个 head
-                for next_head in range(self.num_heads):
-                    new_path = path + [next_head]
-                    
-                    # 计算该路径的期望命中率（各 head 命中率的乘积）
-                    expected_hit = 1.0
-                    for i, h in enumerate(new_path):
-                        expected_hit *= head_hit_rates[h]
-                    
-                    # 如果命中率足够高，加入候选
-                    if expected_hit > 0.01:  # 阈值可调
-                        next_layer.append((new_path, expected_hit))
-            
-            # 按期望命中率排序，保留 top 候选
-            next_layer.sort(key=lambda x: x[1], reverse=True)
-            
-            for path, score in next_layer:
+            for parent_path, parent_prob in [(p, 1.0) for p in current_paths]:
                 if len(medusa_choices) >= max_candidates:
                     break
-                medusa_choices.append(path)
+                
+                # 为当前路径扩展下一层
+                for token_idx in range(self.top_k):
+                    if len(medusa_choices) >= max_candidates:
+                        break
+                    
+                    child_path = parent_path + [token_idx]
+                    
+                    # 计算期望命中率
+                    if depth < len(head_accuracies):
+                        # 使用当前 head 的准确率和衰减因子
+                        expected_prob = parent_prob * head_accuracies[depth] * (0.85 ** token_idx)
+                    else:
+                        expected_prob = parent_prob * 0.1
+                    
+                    # 只保留期望概率足够高的路径
+                    if expected_prob > 0.001:
+                        new_paths.append((child_path, expected_prob))
+                        medusa_choices.append(child_path)
             
-            # 更新当前层
-            current_layer = [path for path, _ in next_layer[:max_candidates // 2]]
+            # 为下一层更新候选路径（按期望概率排序）
+            new_paths.sort(key=lambda x: x[1], reverse=True)
+            current_paths = [p for p, _ in new_paths[:min(len(new_paths), max_candidates // 2)]]
+            depth += 1
             
-            if not current_layer:
+            if not current_paths:
                 break
         
-        # 按长度和索引排序（Medusa 要求）
+        # 验证前缀属性
+        medusa_choices = self._validate_prefix_property(medusa_choices)
+        
+        # 按长度和值排序（Medusa 要求）
+        medusa_choices.sort(key=lambda x: (len(x), x))
+        
+        return medusa_choices
+    
+    def _validate_prefix_property(self, medusa_choices: List[List[int]]) -> List[List[int]]:
+        """验证并修复前缀属性：如果路径存在，其所有前缀也必须存在"""
+        choices_set = set(tuple(c) for c in medusa_choices)
+        
+        # 对所有路径，确保其前缀都在集合中
+        all_required = set()
+        for path in choices_set:
+            # 添加该路径的所有前缀
+            for i in range(1, len(path) + 1):
+                all_required.add(path[:i])
+        
+        # 转换回列表格式
+        result = sorted([list(p) for p in all_required])
+        
+        num_added = len(result) - len(medusa_choices)
+        if num_added > 0:
+            print(f"  ⚠️  Added {num_added} required prefixes to satisfy prefix property")
+        
+        return result
+    
+    def build_tree_from_accuracy(self, stats: Dict, max_candidates: int = 64) -> List[List[int]]:
+        """
+        基于准确率的简化树构建方法
+        
+        采用 Medusa 论文中的方法：基于 head 准确率分配候选数量
+        """
+        print("\nBuilding Medusa tree (accuracy-based)...")
+        
+        # 计算每个 head 的准确率
+        head_accuracies = []
+        for head_idx in range(self.num_heads):
+            if stats['head_accuracy'][head_idx]:
+                acc = np.mean(stats['head_accuracy'][head_idx])
+            else:
+                acc = 0.0
+            head_accuracies.append(acc)
+            print(f"  Head {head_idx}: Top-1 accuracy = {acc:.4f}")
+        
+        # 根据准确率分配每个 head 的候选数量
+        # 准确率越高的 head，分配更多候选
+        total_acc = sum(head_accuracies) + 1e-6
+        candidates_per_head = []
+        for acc in head_accuracies:
+            # 基础分配 + 准确率加权
+            n_candidates = max(1, int(max_candidates * (acc / total_acc)))
+            candidates_per_head.append(min(n_candidates, self.top_k))
+        
+        print(f"  Candidates per head: {candidates_per_head}")
+        
+        # 构建树
+        medusa_choices = []
+        
+        # 方法1：简单的笛卡尔积（适合小规模）
+        from itertools import product
+        
+        # 生成所有组合
+        ranges = [range(n) for n in candidates_per_head]
+        
+        all_paths = []
+        for depth in range(1, self.num_heads + 1):
+            for combo in product(*ranges[:depth]):
+                path = list(combo)
+                # 计算该路径的期望价值
+                expected_value = 1.0
+                for i, k in enumerate(path):
+                    expected_value *= head_accuracies[i] * (0.9 ** k)
+                all_paths.append((path, expected_value))
+        
+        # 按期望值排序，取 top candidates
+        all_paths.sort(key=lambda x: x[1], reverse=True)
+        
+        for path, score in all_paths[:max_candidates]:
+            medusa_choices.append(path)
+        
+        # 排序
         medusa_choices.sort(key=lambda x: (len(x), x))
         
         return medusa_choices
@@ -224,14 +364,17 @@ class MedusaTreeBuilder:
         """保存树配置到 Python 文件"""
         with open(output_path, 'w') as f:
             f.write(f'''# Medusa Tree Configuration: {tree_name}
-# Auto-generated by medusa_tree_builder.py
-# Based on {len(stats['head_accuracy'][0])} validation samples
+# Auto-generated by medusa_tree_builder_fast.py
+# Based on {len(stats['head_accuracy'][0]) if stats['head_accuracy'][0] else 0} validation samples
 
 # Statistics:
 ''')
             for head_idx in range(self.num_heads):
-                acc = np.mean(stats['head_accuracy'][head_idx])
-                hit = np.mean(stats['head_top_k_hit'][head_idx])
+                if stats['head_accuracy'][head_idx]:
+                    acc = np.mean(stats['head_accuracy'][head_idx])
+                    hit = np.mean(stats['head_top_k_hit'][head_idx])
+                else:
+                    acc, hit = 0.0, 0.0
                 f.write(f'#   Head {head_idx}: Accuracy={acc:.4f}, Top-{self.top_k} Hit={hit:.4f}\n')
             
             f.write(f'''
@@ -239,27 +382,28 @@ class MedusaTreeBuilder:
 
 # Tree info:
 #   Total candidates: {len(medusa_choices)}
-#   Max depth: {max(len(path) for path in medusa_choices)}
-#   Avg depth: {np.mean([len(path) for path in medusa_choices]):.2f}
+#   Max depth: {max(len(path) for path in medusa_choices) if medusa_choices else 0}
+#   Avg depth: {np.mean([len(path) for path in medusa_choices]) if medusa_choices else 0:.2f}
 ''')
         
         print(f"\nTree configuration saved to: {output_path}")
         print(f"  Total candidates: {len(medusa_choices)}")
-        print(f"  Max depth: {max(len(path) for path in medusa_choices)}")
+        if medusa_choices:
+            print(f"  Max depth: {max(len(path) for path in medusa_choices)}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build optimal Medusa tree")
+    parser = argparse.ArgumentParser(description="Build optimal Medusa tree (fast version)")
     parser.add_argument("--model_path", type=str, default=".", help="Base model path")
     parser.add_argument("--medusa_head", type=str, required=True, 
                         help="Medusa head checkpoint path (medusa_lm_head.safetensors)")
     parser.add_argument("--num_heads", type=int, default=5, help="Number of Medusa heads")
     parser.add_argument("--data_path", type=str, required=True, 
-                        help="Validation data (JSON with prompts)")
+                        help="Validation data (JSON with conversations)")
     parser.add_argument("--num_samples", type=int, default=1000, 
                         help="Number of samples to use for statistics")
-    parser.add_argument("--max_new_tokens", type=int, default=128, 
-                        help="Max tokens to generate per sample")
+    parser.add_argument("--max_seq_len", type=int, default=2048, 
+                        help="Max sequence length per sample")
     parser.add_argument("--top_k", type=int, default=10, 
                         help="Top-K candidates per head")
     parser.add_argument("--max_candidates", type=int, default=64, 
@@ -267,6 +411,9 @@ def main():
     parser.add_argument("--output", type=str, default="medusa_tree_optimized.py", 
                         help="Output tree configuration file")
     parser.add_argument("--device", type=str, default="cuda:0", help="Device")
+    parser.add_argument("--method", type=str, default="greedy", 
+                        choices=["greedy", "accuracy"],
+                        help="Tree building method: greedy or accuracy-based")
     args = parser.parse_args()
     
     # 加载验证数据
@@ -274,19 +421,10 @@ def main():
     with open(args.data_path, 'r') as f:
         data = json.load(f)
     
-    # 提取 prompts
-    prompts = []
-    for item in data[:args.num_samples]:
-        if "conversations" in item:
-            for conv in item["conversations"]:
-                if conv.get("from") == "human":
-                    prompts.append(conv["value"])
-                    break
-    
-    print(f"Collected {len(prompts)} prompts")
+    print(f"Loaded {len(data)} samples")
     
     # 构建树
-    builder = MedusaTreeBuilder(
+    builder = MedusaTreeBuilderFast(
         args.model_path, 
         args.medusa_head, 
         args.num_heads, 
@@ -294,8 +432,14 @@ def main():
         args.top_k
     )
     
-    stats = builder.collect_statistics(prompts, args.max_new_tokens)
-    medusa_choices = builder.build_tree_greedy(stats, args.max_candidates)
+    # 快速收集统计信息
+    stats = builder.collect_statistics_fast(data, args.num_samples, args.max_seq_len)
+    
+    # 构建树
+    if args.method == "greedy":
+        medusa_choices = builder.build_tree_greedy(stats, args.max_candidates)
+    else:
+        medusa_choices = builder.build_tree_from_accuracy(stats, args.max_candidates)
     
     tree_name = f"pangu_{args.num_heads}heads_top{args.top_k}"
     builder.save_tree_config(medusa_choices, args.output, stats, tree_name)
