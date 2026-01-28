@@ -29,7 +29,7 @@ conda activate medusa-train
 # GPU 1: 生成前半部分 (0-24999)
 echo ""
 echo "[$(date '+%H:%M:%S')] 启动 GPU 1 (样本 0-$((SAMPLES_PER_GPU - 1)))..."
-CUDA_VISIBLE_DEVICES=1 python gen_self_distill_data_fast.py \
+CUDA_VISIBLE_DEVICES=1 python gen_self_distill_data.py \
     --model_path .. \
     --input_data ../third_party/ShareGPT_Vicuna_unfiltered/ShareGPT_V4.3_unfiltered_cleaned_split.json \
     --output_data "${OUTPUT_DIR}/${BASE_NAME}_part0.json" \
