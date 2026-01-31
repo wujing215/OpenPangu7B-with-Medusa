@@ -1,127 +1,169 @@
-# 开源盘古 Embedded-7B-V1.1
+# 基于 Medusa 投机解码的 OpenPangu-7B 在 Ascend NPU 的推理加速实现
 
-中文 | [English](README_EN.md)
+> **OpenPangu-7B 基础模型**请参考：  
+> 👉 https://atomgit.com/ascend-tribe/openPangu-Embedded-7B-V1.1.git
 
-## 1. 简介
+---
 
-openPangu-Embedded-7B-V1.1 是基于昇腾 NPU 从零训练的高效大语言模型，参数量为 7B（不含词表Embedding）。openPangu-Embedded-7B-V1.1 训练了约 25T tokens，具备快慢思考融合与自适应切换能力。
+本仓库围绕 **OpenPangu-7B**，提供了一套**基于 Medusa 的端到端投机推理（Speculative Inference）加速实现**，面向 **昇腾（Ascend）硬件平台**，对大模型推理阶段的自回归解码进行优化加速。
 
-## 2. 模型架构
+---
 
-|                               |   openPangu-Embedded-7B-V1.1   |
-| :---------------------------: | :----------------: |
-|       **Architecture**        |       Dense        |
-|     **Parameters (Non-Embedding)**     |         7B         |
-|     **Number of Layers**      |         34         |
-|     **Hidden Dimension**      |       12800        |
-|    **Attention Mechanism**    |     GQA      |
-| **Number of Attention Heads** | 32 for Q，8 for KV |
-|      **Vocabulary Size**      |        153k        |
-|      **Context Length (Natively)**       |        32k         |
-|    **Pretraining Tokens**     |        25T         |
+## 1. 项目背景
 
-## 3. 测评结果
+在标准自回归解码中，大模型需要逐 Token 生成文本，每一步都执行完整前向计算，实际推理性能往往受限于显存带宽。
 
-|     测评集     |      测评指标       | 慢思考v1.0 | 慢思考v1.1 | 自适应v1.1 |
-| :------------: | :-----------------: | :--------: | :--------: | :--------: |
-|  **通用能力**  |                     |            |            |            |
-|    MMLU-Pro    |     Exact Match     |   76.32    |   75.54    |   72.81    |
-|     CMMLU      |         Acc         |   75.59    |   72.94    |   72.18    |
-| ArenaHard_v0.1 |  w/o style control  |   85.80    |   88.00    |   84.60    |
-|     C-Eval     |         Acc         |   83.05    |   84.92    |   83.33    |
-|  GPQA-Diamond  |        Avg@4        |   70.54    |   73.23    |    73.74    |
-|  **数学能力**  |                     |            |            |            |
-|    MATH-500    |        Avg@1        |   95.00    |   97.00    |   96.00    |
-|     AIME24     |       Avg@16        |   71.57    |   79.38    |   79.02    |
-|     AIME25     |       Avg@16        |   58.24    |   70.00    |   70.21    |
-|  **代码能力**  |                     |            |            |            |
-| LiveCodeBench  | Avg@2 (08/24~01/25) |   54.04    |   58.27    |   58.27    |
-|     MBPP+      |        Avg@2        |   76.06    |   76.46    |   75.66    |
+**投机推理（Speculative Inference）** 通过在一次前向传播中预测并验证多个 Token，以减少解码步数，是当前提升大模型推理效率的重要方向之一。
 
-**注：** 评测过程中system prompt 为空，且不添加任何额外的思维链（CoT）提示。评测采用 128k 的序列长度进行。
+**本仓库项目目标：**
 
-除精度外，我们还在部分数据集上统计了模型的输出长度，通过数据质量驱动的学习策略，自适应快慢思考可以在基本不影响精度地前提下，有效地在简单任务上自动切换部分输出为快思考，大幅缩短平均输出思维链长度（Length）；在难任务通过保持慢思考能力，精度持平纯慢思考模型。
+- 在昇腾架构上实现端到端的 Medusa 投机推理优化 。
+- 构建 OpenPangu-with-Medusa，提升推理吞吐量 。
 
-|     测评集     |      测评指标       |  慢思考v1.1 | 自适应v1.1 |
-| :------------: | :-----------------: |  :--------: | :--------: |
-|  **通用能力**  |                    |            |            |
-|     CMMLU      |         Acc        |   72.94    |   72.18    |
-|        |   Length     |    2574    |   1338    |
-|     C-Eval     |         Acc         |     84.92    |   83.33    |
-|        |   Length     |  2484    |   1723    |
-|  **数学能力**  |               |            |            |
-|     AIME24     |       Avg@16        |     79.38    |   79.02    |
-|        |   Length     |    48229    |   49656   |
-|  **代码能力**  |                |            |            |
-| LiveCodeBench  | Avg@2 (08/24~01/25) |    58.27    |   58.27    |
-|        |   Length     | 58140    |   59307    |
+---
 
-## 4. 部署和使用
+## 2. Medusa 方法概览
 
-### 4.1 环境准备
+Medusa 在主模型输出的隐藏状态上引入多个轻量级预测头（Medusa Heads）：
 
-##### 硬件规格
+- 不同 Head 预测不同步长的未来 Token
+- 多个 Head 的预测结果构成候选 Token 集合
 
-Atlas 800T A2 (64GB)，驱动与固件安装包获取请参照 [[Atlas 800T A2](https://www.hiascend.com/hardware/firmware-drivers/community?product=4&model=26&cann=8.2.RC1.alpha003&driver=Ascend+HDK+25.0.RC1)]。
+在一次解码迭代中：
 
-##### 软件环境
+1. Medusa Heads 并行生成候选 Token
+2. 构造候选 Token 树
+3. 通过 Tree Attention 一次性验证所有候选
+4. 接受最长可行 Token 前缀并继续解码
 
-- 操作系统：Linux（推荐 openEuler>=24.03）
-- CANN==8.1.RC1，安装准备及流程请参照 [[CANN Install]](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/softwareinst/instg/instg_0001.html?Mode=PmIns&OS=Ubuntu&Software=cannToolKit)
-- python==3.10
-- torch==2.1.0
-- torch-npu==2.1.0.post12
-- transformers==4.53.2
+该方式在保证生成一致性的前提下，有效减少了解码轮数。
 
-以上软件配套经过验证，理论可以支持更高版本，如有疑问，可以提交 issue。
+---
 
-### 4.2 权重完整性校验
+## 3. 投机推理实现
 
-请参考以下方法对下载内容进行完整性校验，hash 值存储在 checklist.chk 文件中。
+本仓库实现了**完整可用的 Medusa 推理流程**，主要包含：
 
+- **Prefill 阶段**：处理输入 Prompt
+- **候选生成**：Medusa Heads 预测未来 Token
+- **Tree Attention 解码**：并行验证候选 Token
+- **后验评估与状态更新**：确定可接受 Token 并进入下一轮
+
+整体接口对用户仍表现为标准的文本生成流程。
+
+---
+
+## 4. Ascend 平台工程化
+
+针对昇腾硬件特性，仓库在实现中对投机推理流程进行了工程化优化：
+
+- 将候选 Token 树及相关索引提前构建为**静态 Tensor 结构**
+- 使用固定 Attention Mask 与索引映射，减少动态控制流
+- 降低 Host–Device 交互开销，适配 Ascend 图执行模式
+
+上述设计使 Medusa 投机推理能够稳定运行在 Ascend 平台上。
+
+---
+
+## 5. 代码目录结构
+
+```text
+OpenPangu7B-with-Medusa/
+├── 核心模型文件
+│   ├── config.json
+│   ├── configuration_openpangu_dense.py
+│   ├── modeling_openpangu_dense.py
+│   ├── modular_openpangu_dense.py
+│   ├── tokenization_openpangu.py
+│   ├── tokenizer_config.json
+│   └── special_tokens_map.json
+│
+├── Medusa 相关实现
+│   ├── medusa_model.py                  # Medusa 核心推理实现
+│   ├── medusa_compat.py                 # Transformers 兼容适配
+│   ├── medusa_choices.py                # 投机推理候选树配置
+│   └── third_party/
+│       └── Medusa/                      # Medusa 原始实现
+│
+├── inference/
+│   ├── generate.py                      # 基础模型推理
+│   ├── medusa_generate.py               # Medusa 投机推理（Ascend）
+│   └── benchmark.py                     # 推理性能测试
+│
+├── train/
+│   ├── train_medusa.py                  # Medusa Heads 训练
+│   ├── train_medusa_5heads.sh
+│   └── medusa_tree_builder.py
+│
+├── patches/
+│   └── medusa_transformers_compat.patch
+│
+├── deepspeed.json
+├── generation_config.json
+└── apply_patches.sh
 ```
-#!/usr/bin/env bash
-ARCH=$(uname -m)
-MODEL_PATH="${TARGET_FOLDER}/${MODEL_FOLDER_PATH}"
-cd "$MODEL_PATH" || exit 1
-if [ "$ARCH" = "arm64" ]; then
-    sha256sum checklist.chk
-else
-    sha256sum -c checklist.chk
-fi
-```
 
-### 4.3 推理样例
+---
 
-下述内容提供 openPangu-Embedded-7B-V1.1 在 `transformers` 框架上进行推理的一个简单示例：
 
-> 运行前请修改 generate.py，添加模型路径。
+## 6. 实验结果
+
+- **中短文本生成场景收益明显**：
+  - 端到端推理速度可提升约 **1.3×–1.4×**
+
+- **Accept Rate 较为稳定**：
+  - 随生成长度增加缓慢下降
+
+- **长序列加速效果受限**：
+  - 额外验证与访存开销逐渐增大
+
+整体来看，该投机推理方案更适合对生成延迟敏感、文本长度中等的应用场景。
+
+---
+
+## 7. 环境部署与使用指南
+
+### 7.1 环境准备
 
 ```bash
-cd inference
-python generate.py
+git clone https://github.com/wujing215/OpenPangu7B-with-Medusa.git
+cd OpenPangu7B-with-Medusa/third_party
+git clone https://github.com/FasterDecoding/Medusa.git
+pip install -e .
+
 ```
 
-openPangu-Embedded-7B-V1.1 模型默认为慢思考模式，可以通过以下手段切换至快慢自适应切换/快思考模式：
+### 7.2 运行方法
 
-- 在代码实例`generate.py`中，`auto_thinking_prompt`与`no_thinking_prompt`变量的定义展示了切换至快慢自适应或快思考模式的具体实现：通过在用户输入末尾添加`/auto_think`或`/no_think`标记，可将当前轮次切换至快慢自适应切换/快思考模式。
+> ```Bash
+> cd OpenPangu7B-with-Medusa
+> # 单次推理
+> python inference/medusa_generate.py --device npu \    # 选择运行设备
+>     --base_model /path/to/openpangu \    # 基础模型权重文件所在路径
+>     --medusa_dir /path/to/medusa_head \    # Medusa Heads权重文件所在路径
+>     --prompt xxxx    # xxxx为用户单次提问输入
+> # 交互式推理
+> python inference/medusa_generate.py --device npu \    # 选择运行设备
+>     --base_model /path/to/openpangu \    # 基础模型权重文件所在路径
+>     --medusa_dir /path/to/medusa_head \    # Medusa Heads权重文件所在路径
+>     --interactive    # 启动交互式连续问答模式
+> # benchmark
+> python inference/benchmark.py \
+>     --base_model /path/to/openpangu \    # 基础模型权重文件所在路径
+>     --medusa_dir /path/to/medusa_head     # Medusa Heads权重文件所在路径
+> ```
+>
+> - 支持huggingface权重加载：
+>
+> ```bash
+> # 通过huggingface仓库加载
+> python inference/medusa_generate.py --device npu \    # 选择运行设备
+>     --base_model Ivy0525/openPangu7B-with-Medusa \    # hf仓库名
+    --medusa_dir Ivy0525/openPangu7B-with-Medusa \    # hf仓库名
+>     --prompt "Give me a short intruduction to LLM."    # 示例prompt
+> ```
 
-### 4.4 使用推理框架
+---
 
-vllm_ascend：参考[[vllm_ascend_for_openpangu_embedded_7b.zh]](inference/vllm_ascend_for_openpangu_embedded_7b.zh.md)
 
-## 5. 模型许可证
 
-除文件中对开源许可证另有约定外，openPangu-Embedded-7B-V1.1 模型根据 OPENPANGU MODEL LICENSE AGREEMENT VERSION 1.0 授权，旨在允许使用并促进人工智能技术的进一步发展。有关详细信息，请参阅模型存储库根目录中的 [LICENSE](LICENSE) 文件。
-
-## 6. 免责声明
-
-由于 openPangu-Embedded-7B-V1.1（“模型”）所依赖的技术固有的技术限制，以及人工智能生成的内容是由盘古自动生成的，华为无法对以下事项做出任何保证：
-
-- 尽管该模型的输出由 AI 算法生成，但不能排除某些信息可能存在缺陷、不合理或引起不适的可能性，生成的内容不代表华为的态度或立场；
-- 无法保证该模型 100% 准确、可靠、功能齐全、及时、安全、无错误、不间断、持续稳定或无任何故障；
-- 该模型的输出内容不构成任何建议或决策，也不保证生成的内容的真实性、完整性、准确性、及时性、合法性、功能性或实用性。生成的内容不能替代医疗、法律等领域的专业人士回答您的问题。生成的内容仅供参考，不代表华为的任何态度、立场或观点。您需要根据实际情况做出独立判断，华为不承担任何责任。
-
-## 7. 反馈
-
-如果有任何意见和建议，请提交issue或联系 openPangu@huawei.com。

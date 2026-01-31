@@ -1,124 +1,163 @@
-# openPangu-Embedded-7B-V1.1
-[中文](README.md) | English
+# Medusa-based Speculative Decoding Acceleration for OpenPangu-7B on Ascend NPU
 
-## 1. Introduction
-The openPangu-Embedded-7B-V1.1 is an efficient large language model trained from scratch based on the Ascend NPU. It contains 7 billion parameters (excluding the vocabulary embedding layer). The openPangu-Embedded-7B-V1.1 has been trained on approximately 25T tokens. The model is capable of integrating both fast and slow thinking, and can adaptively switch between two thinking mode based on assessed query complexity.
+> **Base OpenPangu-7B model**:  
+> 👉 https://atomgit.com/ascend-tribe/openPangu-Embedded-7B-V1.1.git
 
+---
 
-## 2. Model Architecture
+This repository provides an **end-to-end Medusa-based speculative inference acceleration implementation** for **OpenPangu-7B**, targeting the **Ascend hardware platform**. The goal is to optimize autoregressive decoding during large language model inference.
 
-|                               |   openPangu-Embedded-7B-V1.1   |
-| :---------------------------: | :----------------: |
-|       **Architecture**        |       Dense        |
-|     **Parameters (Non-Embedding)**     |         7B         |
-|     **Number of Layers**      |         34         |
-|     **Hidden Dimension**      |       12800        |
-|    **Attention Mechanism**    |     GQA      |
-| **Number of Attention Heads** | 32 for Q，8 for KV |
-|      **Vocabulary Size**      |        153k        |
-|      **Context Length (Natively)**       |        32k         |
-|    **Pretraining Tokens**     |        25T         |
+---
 
+## 1. Background
 
-## 3. Results
+In standard autoregressive decoding, large language models generate tokens sequentially, requiring a full forward pass at each step. In practice, inference performance is often limited by memory bandwidth.
 
-| Benchmark | Metric | Slow-thinking v1.0 | Slow-thinking v1.1 | Adaptive-switching v1.1 |
-| :---: | :---: | :---: | :---: | :---: |
-| **General** |  |  |  |  |
-| MMLU-Pro |  Exact Match | 76.32 |   75.54    |   72.81    |
-| CMMLU  |         Acc   | 75.59 |   72.94    |   72.18    |
-| ArenaHard_v0.1    |   w/o style control  | 85.80 |   88.00    |   84.60    |
-| C-Eval  |         Acc   | 83.05 |   84.92    |   83.33    |
-| GPQA-Diamond	| Avg@4	| 70.54 |   73.23    |    73.74    |
-| **Math** |  |  |            |            |
-| MATH-500 | Avg@1 | 95.00 |   97.00    |   96.00    |
-| AIME24 | Avg@16 | 71.57 |   79.38    |   79.02    |
-| AIME25 | Avg@16 | 58.24 |   70.00    |   70.21    |
-| **Coding** |  |  |            |            |
-| LiveCodeBench |  Avg@2 (08/24~01/25) | 54.04 |   58.27    |   58.27    |
-| MBPP+ |      Avg@2     | 76.06 |   76.46    |   75.66    |
+**Speculative Inference** reduces the number of decoding iterations by predicting and validating multiple future tokens within a single forward pass.
 
-**Note:** The system prompt is left empty, and no additional Chain-of-Thought (CoT) prompts are introduced during the evaluation. All evaluations are performed using a sequence length of 128k tokens.
+**Objectives:**
 
-In addition to accuracy, we also analyzed the model's output length on some datasets. Through data quality-driven learning strategy, adaptive-switching mode can effectively automatically switch some outputs to fast thinking on simple tasks without significantly affecting accuracy, significantly shortening the average Chain-of-Thought length. On difficult tasks, by maintaining slow thinking capabilities, the accuracy is comparable to that of a pure slow-thinking model.
+- Enable end-to-end Medusa speculative decoding optimization on Ascend architecture.
+- Develop OpenPangu-with-Medusa for improved inference throughput.
 
-|     Benchmark |   Metric       |  Slow-thinking v1.1 | Adaptive-switching v1.1 |
-| :------------: | :-----------------: |  :--------: | :--------: |
-|  **General**  |                    |            |            |
-|     CMMLU      |         Acc        |   72.94    |   72.18    |
-|        |   Length     |    2574    |   1338    |
-|     C-Eval     |         Acc         |     84.92    |   83.33    |
-|        |   Length     |  2484    |   1723    |
-|  **Math**  |               |            |            |
-|     AIME24     |       Avg@16        |     79.38    |   79.02    |
-|        |   Length     |    48229    |   49656   |
-|  **Coding**  |                |            |            |
-| LiveCodeBench  | Avg@2 (08/24~01/25) |    58.27    |   58.27    |
-|        |   Length     | 58140    |   59307    |
+---
 
-## 4. Deployment
+## 2. Overview of Medusa
 
-### 4.1 Environment
+Medusa augments the backbone model with multiple lightweight prediction heads (Medusa Heads):
 
-##### Hardware Requirements
+- Each head predicts tokens at different future offsets
+- Predictions jointly form a set of candidate tokens
 
-Atlas 800T A2 (64GB), please refer to [[Atlas 800T A2](https://www.hiascend.com/hardware/firmware-drivers/community?product=4&model=26&cann=8.2.RC1.alpha003&driver=Ascend+HDK+25.0.RC1)] for obtaining the driver and firmware installation packages.
+Within one decoding iteration:
 
-#### System Requirements & Dependencies
+1. Medusa Heads generate candidate tokens in parallel  
+2. A candidate token tree is constructed  
+3. Tree Attention validates all candidates in a single forward pass  
+4. The longest valid token prefix is accepted  
 
-- System: Linux (OpenEuler ≥ 24.03 recommended)
-- CANN==8.1.RC1: [[CANN Install]](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/softwareinst/instg/instg_0001.html?Mode=PmIns&OS=Ubuntu&Software=cannToolKit)
-- python==3.10
-- torch==2.1.0
-- torch-npu==2.1.0.post12
-- transformers==4.53.2
+This approach reduces decoding steps while preserving output correctness.
 
-The above software environment has been verified, and theoretically supports newer versions. For any questions, please submit an issue.
+---
 
-### 4.2 Integrity Check
+## 3. Speculative Inference Workflow
 
-Please refer to the following methods to verify the integrity of the downloaded content. The hash values are stored in the `checklist.chk` file.
+This repository implements a **complete Medusa inference workflow**, including:
 
+- **Prefill stage** for prompt processing  
+- **Candidate generation** via Medusa Heads  
+- **Tree Attention decoding** for parallel validation  
+- **Posterior evaluation and state update**
+
+From the user perspective, the interface remains consistent with standard text generation.
+
+---
+
+## 4. Ascend-Oriented Engineering
+
+To adapt speculative inference to Ascend hardware, the implementation includes:
+
+- **Static tensor** representations of candidate token trees
+- Fixed attention masks to reduce dynamic control flow
+- Minimized host–device interaction for graph execution
+
+These optimizations enable stable Medusa-based inference on Ascend platforms.
+
+---
+
+## 5. Code Structure
+
+```text
+OpenPangu7B-with-Medusa/
+├── Core model files
+│   ├── config.json
+│   ├── configuration_openpangu_dense.py
+│   ├── modeling_openpangu_dense.py
+│   ├── modular_openpangu_dense.py
+│   ├── tokenization_openpangu.py
+│   ├── tokenizer_config.json
+│   └── special_tokens_map.json
+│
+├── Medusa implementation
+│   ├── medusa_model.py
+│   ├── medusa_compat.py
+│   ├── medusa_choices.py
+│   └── third_party/Medusa/
+│
+├── inference/
+│   ├── generate.py
+│   ├── medusa_generate.py
+│   └── benchmark.py
+│
+├── train/
+│   ├── train_medusa.py
+│   ├── train_medusa_5heads.sh
+│   └── medusa_tree_builder.py
+│
+├── patches/
+│   └── medusa_transformers_compat.patch
+│
+├── deepspeed.json
+├── generation_config.json
+└── apply_patches.sh
 ```
-#!/usr/bin/env bash
-ARCH=$(uname -m)
-MODEL_PATH="${TARGET_FOLDER}/${MODEL_FOLDER_PATH}"
-cd "$MODEL_PATH" || exit 1
-if [ "$ARCH" = "arm64" ]; then
-    sha256sum checklist.chk
-else
-    sha256sum -c checklist.chk
-fi
-```
 
-### 4.3 Inference Examples
+---
 
-The following provides a simple inference example of openPangu-Embedded-7B-V1.1 based on the `transformers` framework: 
->Please modify generate.py and add the model path before running.
+## 6. Experimental Results
+
+
+- **Short to medium-length generation** achieves about 1.3×–1.4× end-to-end speedup
+- **Accept rate** decreases slowly as generation length increases
+- **Long-sequence gains are limited** due to additional validation overhead
+
+This approach is best suited for latency-sensitive workloads with moderate output lengths.
+
+---
+
+## 7. Environment Setup and Usage
+
+### 7.1 Environment
+
 ```bash
-cd inference
-python generate.py
+git clone https://github.com/wujing215/OpenPangu7B-with-Medusa.git
+cd OpenPangu7B-with-Medusa/third_party
+git clone https://github.com/FasterDecoding/Medusa.git
+pip install -e .
+
 ```
 
-The openPangu-Embedded-7B-V1.1 model is in slow thinking mode by default, and can be switched to adaptive/fast thinking mode by the following means:
-- In the code example `generate.py`, the definition of the `auto_thinking_prompt` and `no_thinking_prompt` variables demonstrates the specific implementation for switching to adaptive/fast thinking mode: by appending the `/auto_think` or `/no_think` tag at the end of user input, the current turn can be switched to fast thinking mode. In this mode, `thinking_content` will be an empty value.
+### 7.2 Inference Examples
 
-### 4.4 Using Inference Framework
-vllm_ascend：[[vllm_ascend_for_openpangu_embedded_7b]](inference/vllm_ascend_for_openpangu_embedded_7b.md)
+> ```Bash
+> cd OpenPangu7B-with-Medusa
+> # Single inference
+> python inference/medusa_generate.py --device npu \    # Select device
+>     --base_model /path/to/openpangu \    # Path to base model weights
+>     --medusa_dir /path/to/medusa_head \    # Path to Medusa Heads weights
+>     --prompt xxxx    # User input prompt
+> # Interactive inference
+> python inference/medusa_generate.py --device npu \    # Select device
+>     --base_model /path/to/openpangu \    # Path to base model weights
+>     --medusa_dir /path/to/medusa_head \    # Path to Medusa Heads weights
+>     --interactive    # Enable interactive Q&A mode
+> # Benchmark
+> python inference/benchmark.py \
+>     --base_model /path/to/openpangu \    # Path to base model weights
+>     --medusa_dir /path/to/medusa_head     # Path to Medusa Heads weights
+> ```
+>
+> - Loading from HuggingFace:
+>
+> ```bash
+# Load from HuggingFace repository
+python inference/medusa_generate.py --device npu \    # Select device
+    --base_model Ivy0525/openPangu7B-with-Medusa \    # HF repo name
+    --medusa_dir Ivy0525/openPangu7B-with-Medusa \    # HF repo name
+    --prompt "Give me a short intruduction to LLM."    # Example prompt
+> ```
+
+---
 
 
 
-
-## 5. Model License
-
-Unless otherwise noted, openPangu-Embedded-7B-V1.1 model is licensed under the terms and conditions of OPENPANGU MODEL LICENSE AGREEMENT VERSION 1.0, which is intended to be used permissively and enable the further development of artificial intelligence technologies. Please refer to the [LICENSE](LICENSE) file located in the root directory of the model repository for details.
-
-## 6. Disclaimer
-Due to the technical limitations inherent in the technology on which the openPangu-Embedded-7B-V1.1 (“Model”) relies and the fact that the artificial intelligence generated content is automatically produced by Model, Huawei cannot make any guarantees regarding the following matters:
-- The output of this Model is automatically generated via AI algorithms, it does not rule out the possibility that some of the information may be flawed, unreasonable, or cause discomfort, and the generated content does not represent Huawei's attitude or standpoint;
-- There is no guarantee that this Model is 100% accurate, reliable, functional, timely, secure and safety, error-free, uninterrupted, continuously stable, or free of any faults;
-- The output of this Model does not constitute any advices or decisions for you, and it does not guarantee the authenticity, completeness, accuracy, timeliness, legality, functionality, or practicality of the generated content. The generated content cannot replace professionals in medical, legal, and other fields in answering your questions. The generated content is for your reference only and does not represent any attitude, standpoint, or position of Huawei. You need to make independent judgments based on your actual situation, and Huawei does not assume any responsibilities.
-
-
-## 7. Contact Us
-If you have any comments or suggestions, please submit an issue or contact openPangu@huawei.com.
