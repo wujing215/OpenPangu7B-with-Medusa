@@ -3,7 +3,7 @@
 > **OpenPangu-7B 基础模型**请参考：  
 > 👉 https://atomgit.com/ascend-tribe/openPangu-Embedded-7B-V1.1.git
 
----
+
 
 本仓库围绕 **OpenPangu-7B**，提供了一套**基于 Medusa 的端到端投机推理（Speculative Inference）加速实现**，面向 **昇腾（Ascend）硬件平台**，对大模型推理阶段的自回归解码进行优化加速。
 
@@ -20,7 +20,7 @@
 - 在昇腾架构上实现端到端的 Medusa 投机推理优化 。
 - 构建 OpenPangu-with-Medusa，提升推理吞吐量 。
 
----
+
 
 ## 2. Medusa 方法概览
 
@@ -38,7 +38,7 @@ Medusa 在主模型输出的隐藏状态上引入多个轻量级预测头（Medu
 
 该方式在保证生成一致性的前提下，有效减少了解码轮数。
 
----
+
 
 ## 3. 投机推理实现
 
@@ -51,7 +51,7 @@ Medusa 在主模型输出的隐藏状态上引入多个轻量级预测头（Medu
 
 整体接口对用户仍表现为标准的文本生成流程。
 
----
+
 
 ## 4. Ascend 平台工程化
 
@@ -63,7 +63,7 @@ Medusa 在主模型输出的隐藏状态上引入多个轻量级预测头（Medu
 
 上述设计使 Medusa 投机推理能够稳定运行在 Ascend 平台上。
 
----
+
 
 ## 5. 代码目录结构
 
@@ -103,23 +103,32 @@ OpenPangu7B-with-Medusa/
 └── apply_patches.sh
 ```
 
----
+
 
 
 ## 6. 实验结果
 
-- **中短文本生成场景收益明显**：
-  - 端到端推理速度可提升约 **1.3×–1.4×**
+### 6.1 加速效果
 
-- **Accept Rate 较为稳定**：
-  - 随生成长度增加缓慢下降
+| 解码长度 | Accept Rate | Speedup |
+|:--------:|:-----------:|:-------:|
+| 64       | 1.84        | **1.43×** |
+| 128      | 1.78        | 1.32×   |
+| 256      | 1.69        | 1.13×   |
 
-- **长序列加速效果受限**：
-  - 额外验证与访存开销逐渐增大
+### 6.2 结果分析
 
-整体来看，该投机推理方案更适合对生成延迟敏感、文本长度中等的应用场景。
+- **端到端加速显著**：在短序列生成（Decode Length = 64）场景下，获得最高 **1.43 倍**加速比，有效利用了昇腾 NPU 的空闲算力。
 
----
+- **解码长度的影响**：随着生成序列变长，Accept Rate 从 1.84 下降至 1.69，导致加速比相应回落。这是因为上下文增长带来的文本分布不确定性增大，轻量级 Medusa Head 的预测准确率略有下降。
+
+- **静态图优化是关键**：得益于静态候选树构建与零拷贝路径回溯机制，在 Ascend 910B 上将初始计算开销（Overhead）控制在较低水平，使得解码长度 < 1024 的场景均能实现正向加速。
+
+### 6.3 结论
+
+实验证明 OpenPangu-with-Medusa 方案在昇腾硬件上是有效的，**特别适合中短文本生成的低延迟场景**。
+
+
 
 ## 7. 环境部署与使用指南
 
@@ -135,35 +144,35 @@ pip install -e .
 
 ### 7.2 运行方法
 
-> ```Bash
-> cd OpenPangu7B-with-Medusa
-> # 单次推理
-> python inference/medusa_generate.py --device npu \    # 选择运行设备
->     --base_model /path/to/openpangu \    # 基础模型权重文件所在路径
->     --medusa_dir /path/to/medusa_head \    # Medusa Heads权重文件所在路径
->     --prompt xxxx    # xxxx为用户单次提问输入
-> # 交互式推理
-> python inference/medusa_generate.py --device npu \    # 选择运行设备
->     --base_model /path/to/openpangu \    # 基础模型权重文件所在路径
->     --medusa_dir /path/to/medusa_head \    # Medusa Heads权重文件所在路径
->     --interactive    # 启动交互式连续问答模式
-> # benchmark
-> python inference/benchmark.py \
->     --base_model /path/to/openpangu \    # 基础模型权重文件所在路径
->     --medusa_dir /path/to/medusa_head     # Medusa Heads权重文件所在路径
-> ```
->
-> - 支持huggingface权重加载：
->
-> ```bash
-> # 通过huggingface仓库加载
-> python inference/medusa_generate.py --device npu \    # 选择运行设备
->     --base_model Ivy0525/openPangu7B-with-Medusa \    # hf仓库名
-    --medusa_dir Ivy0525/openPangu7B-with-Medusa \    # hf仓库名
->     --prompt "Give me a short intruduction to LLM."    # 示例prompt
-> ```
+ ```Bash
+ cd OpenPangu7B-with-Medusa
+ # 单次推理
+ python inference/medusa_generate.py --device npu \    # 选择运行设备
+     --base_model /path/to/openpangu \    # 基础模型权重文件所在路径
+     --medusa_dir /path/to/medusa_head \    # Medusa Heads权重文件所在路径
+     --prompt xxxx    # xxxx为用户单次提问输入
+ # 交互式推理
+ python inference/medusa_generate.py --device npu \    # 选择运行设备
+     --base_model /path/to/openpangu \    # 基础模型权重文件所在路径
+     --medusa_dir /path/to/medusa_head \    # Medusa Heads权重文件所在路径
+     --interactive    # 启动交互式连续问答模式
+ # benchmark
+ python inference/benchmark.py \
+     --base_model /path/to/openpangu \    # 基础模型权重文件所在路径
+     --medusa_dir /path/to/medusa_head     # Medusa Heads权重文件所在路径
+ ```
 
----
+ - 支持huggingface权重加载：
+
+ ```bash
+ # 通过huggingface仓库加载
+ python inference/medusa_generate.py --device npu \    # 选择运行设备
+     --base_model Ivy0525/openPangu7B-with-Medusa \    # hf仓库名
+     --medusa_dir Ivy0525/openPangu7B-with-Medusa \    # hf仓库名
+     --prompt "Give me a short intruduction to LLM."    # 示例prompt
+ ```
+
+
 
 
 

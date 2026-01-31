@@ -3,7 +3,7 @@
 > **Base OpenPangu-7B model**:  
 > 👉 https://atomgit.com/ascend-tribe/openPangu-Embedded-7B-V1.1.git
 
----
+
 
 This repository provides an **end-to-end Medusa-based speculative inference acceleration implementation** for **OpenPangu-7B**, targeting the **Ascend hardware platform**. The goal is to optimize autoregressive decoding during large language model inference.
 
@@ -20,7 +20,7 @@ In standard autoregressive decoding, large language models generate tokens seque
 - Enable end-to-end Medusa speculative decoding optimization on Ascend architecture.
 - Develop OpenPangu-with-Medusa for improved inference throughput.
 
----
+
 
 ## 2. Overview of Medusa
 
@@ -38,7 +38,7 @@ Within one decoding iteration:
 
 This approach reduces decoding steps while preserving output correctness.
 
----
+
 
 ## 3. Speculative Inference Workflow
 
@@ -51,7 +51,7 @@ This repository implements a **complete Medusa inference workflow**, including:
 
 From the user perspective, the interface remains consistent with standard text generation.
 
----
+
 
 ## 4. Ascend-Oriented Engineering
 
@@ -63,7 +63,7 @@ To adapt speculative inference to Ascend hardware, the implementation includes:
 
 These optimizations enable stable Medusa-based inference on Ascend platforms.
 
----
+
 
 ## 5. Code Structure
 
@@ -102,18 +102,31 @@ OpenPangu7B-with-Medusa/
 └── apply_patches.sh
 ```
 
----
+
 
 ## 6. Experimental Results
 
+### 6.1 Speedup Performance
 
-- **Short to medium-length generation** achieves about 1.3×–1.4× end-to-end speedup
-- **Accept rate** decreases slowly as generation length increases
-- **Long-sequence gains are limited** due to additional validation overhead
+| Decode Length | Accept Rate | Speedup |
+|:-------------:|:-----------:|:-------:|
+| 64            | 1.84        | **1.43×** |
+| 128           | 1.78        | 1.32×   |
+| 256           | 1.69        | 1.13×   |
 
-This approach is best suited for latency-sensitive workloads with moderate output lengths.
+### 6.2 Analysis
 
----
+- **Significant end-to-end speedup**: Achieved up to **1.43× speedup** for short sequence generation (Decode Length = 64), effectively utilizing idle compute capacity on Ascend NPU.
+
+- **Impact of decode length**: As sequence length increases, Accept Rate drops from 1.84 to 1.69, leading to reduced speedup. This is due to increased uncertainty in text distribution as context grows, slightly lowering Medusa Head prediction accuracy.
+
+- **Static graph optimization is key**: Thanks to static candidate tree construction and zero-copy path retrieval mechanisms, computation overhead is kept low on Ascend 910B, enabling positive speedup for decode lengths < 1024.
+
+### 6.3 Conclusion
+
+Experiments demonstrate that OpenPangu-with-Medusa is effective on Ascend hardware, **particularly well-suited for low-latency short-to-medium text generation scenarios**.
+
+
 
 ## 7. Environment Setup and Usage
 
@@ -129,35 +142,35 @@ pip install -e .
 
 ### 7.2 Inference Examples
 
-> ```Bash
-> cd OpenPangu7B-with-Medusa
-> # Single inference
-> python inference/medusa_generate.py --device npu \    # Select device
->     --base_model /path/to/openpangu \    # Path to base model weights
->     --medusa_dir /path/to/medusa_head \    # Path to Medusa Heads weights
->     --prompt xxxx    # User input prompt
-> # Interactive inference
-> python inference/medusa_generate.py --device npu \    # Select device
->     --base_model /path/to/openpangu \    # Path to base model weights
->     --medusa_dir /path/to/medusa_head \    # Path to Medusa Heads weights
->     --interactive    # Enable interactive Q&A mode
-> # Benchmark
-> python inference/benchmark.py \
->     --base_model /path/to/openpangu \    # Path to base model weights
->     --medusa_dir /path/to/medusa_head     # Path to Medusa Heads weights
-> ```
->
-> - Loading from HuggingFace:
->
-> ```bash
+ ```Bash
+ cd OpenPangu7B-with-Medusa
+ # Single inference
+ python inference/medusa_generate.py --device npu \    # Select device
+     --base_model /path/to/openpangu \    # Path to base model weights
+     --medusa_dir /path/to/medusa_head \    # Path to Medusa Heads weights
+     --prompt xxxx    # User input prompt
+ # Interactive inference
+ python inference/medusa_generate.py --device npu \    # Select device
+     --base_model /path/to/openpangu \    # Path to base model weights
+     --medusa_dir /path/to/medusa_head \    # Path to Medusa Heads weights
+     --interactive    # Enable interactive Q&A mode
+ # Benchmark
+ python inference/benchmark.py \
+     --base_model /path/to/openpangu \    # Path to base model weights
+     --medusa_dir /path/to/medusa_head     # Path to Medusa Heads weights
+ ```
+
+ - Loading from HuggingFace:
+
+ ```bash
 # Load from HuggingFace repository
 python inference/medusa_generate.py --device npu \    # Select device
     --base_model Ivy0525/openPangu7B-with-Medusa \    # HF repo name
     --medusa_dir Ivy0525/openPangu7B-with-Medusa \    # HF repo name
     --prompt "Give me a short intruduction to LLM."    # Example prompt
-> ```
+```
 
----
+
 
 
 
