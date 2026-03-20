@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Medusa Tree 构建工具 - 优化版本（快速）
+Medusa Tree 构建
 
 优化点：
 1. 单次 forward pass 收集所有 head 的统计信息（不逐 token 生成）
@@ -12,7 +12,6 @@ Medusa Tree 构建工具 - 优化版本（快速）
 2. 对每个位置，检查 Medusa head 的预测是否匹配下一个 token
 3. 使用贪婪算法构建最优树结构
 
-参考论文：Medusa: Simple LLM Inference Acceleration Framework
 """
 
 import argparse
@@ -195,7 +194,7 @@ class MedusaTreeBuilderFast:
         return stats
     
     def build_tree_greedy(self, stats: Dict, max_candidates: int = 64) -> List[List[int]]:
-        """基于统计数据构建最优树（完全遵循 Medusa 论文原版期望贪心算法）"""
+        """基于统计数据构建最优树"""
         print("\nBuilding Medusa tree (Greedy Selection of Maximum Expected Acceptance Length)...")
         
         # 计算每个 head 的准确率及其 decay rate
@@ -222,7 +221,7 @@ class MedusaTreeBuilderFast:
         for token_idx in range(self.top_k):
             # 第一层的期望准确率 = head 0 的准确率 * 该层特定的衰减因子
             expected_prob = head_accuracies[0] * (head_decay_rates[0] ** token_idx)
-            # 根据论文，期望贡献恰好等于联合准确率
+            # 期望贡献恰好等于联合准确率
             candidates.append(([token_idx], expected_prob, expected_prob))
             
         # 使用 Best-First Search 扩展节点，直到选满 max_candidates 个节点
@@ -250,7 +249,7 @@ class MedusaTreeBuilderFast:
         # 验证前缀属性（双重保险）
         medusa_choices = self._validate_prefix_property(medusa_choices)
         
-        # 按长度和值排序（Medusa 框架约定俗成的易读格式）
+        # 按长度和值排序
         medusa_choices.sort(key=lambda x: (len(x), x))
         
         return medusa_choices
@@ -276,7 +275,7 @@ class MedusaTreeBuilderFast:
         return result
     
     def build_tree_from_accuracy(self, stats: Dict, max_candidates: int = 64) -> List[List[int]]:
-        """基于准确率的简化树构建方法（基于 Medusa 论文思想连乘评估全量组合）"""
+        """基于准确率的简化树构建方法"""
         print("\nBuilding Medusa tree (accuracy-based with actual decay)...")
         
         # 计算每个 head 的准确率及其 decay rate
@@ -304,7 +303,7 @@ class MedusaTreeBuilderFast:
         for depth in range(1, self.num_heads + 1):
             for combo in product(*ranges[:depth]):
                 path = list(combo)
-                # 计算论文中定义的连乘期望贡献
+                # 计算连乘期望贡献
                 expected_value = 1.0
                 for i, k in enumerate(path):
                     expected_value *= head_accuracies[i] * (head_decay_rates[i] ** k)
