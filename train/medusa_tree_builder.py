@@ -195,87 +195,62 @@ class MedusaTreeBuilderFast:
         return stats
     
     def build_tree_greedy(self, stats: Dict, max_candidates: int = 64) -> List[List[int]]:
-        """基于统计数据构建最优树（满足前缀属性）
+        """基于统计数据构建最优树（完全遵循 Medusa 论文原版期望贪心算法）"""
+        print("\nBuilding Medusa tree (Greedy Selection of Maximum Expected Acceptance Length)...")
         
-        返回 medusa_choices 格式：[[0], [1], [2], [0, 0], [0, 1], [1, 0], ...]
-        
-        关键约束：必须满足前缀属性
-        - 如果 [a, b, c] 在树中，那么 [a] 和 [a, b] 也必须在树中
-        """
-        print("\nBuilding Medusa tree (prefix-preserving)...")
-        
-        # 计算每个 head 的平均准确率
+        # 计算每个 head 的准确率及其 decay rate
         head_accuracies = []
+        head_decay_rates = []
         for head_idx in range(self.num_heads):
             if stats['head_accuracy'][head_idx]:
                 acc = np.mean(stats['head_accuracy'][head_idx])
+                hit = np.mean(stats['head_top_k_hit'][head_idx])
             else:
-                acc = 0.01
+                acc, hit = 0.01, 0.01
             head_accuracies.append(acc)
-            print(f"  Head {head_idx}: Top-1 Accuracy = {acc:.4f}")
+            # 通过理论公式估算 token 排列的衰减系数 r: A * (1-r^K)/(1-r) ≈ Hit -> r ≈ (Hit - Acc)/Hit
+            r = (hit - acc) / max(hit, 1e-6)
+            r = max(0.01, min(0.95, r))
+            head_decay_rates.append(r)
+            print(f"  Head {head_idx}: Top-1 Accuracy = {acc:.4f}, Decay Rate = {r:.4f}")
         
-        # 使用贪心算法构建树，确保前缀属性
         medusa_choices = []
+        # candidates: 存储格式为 (路径_list, 真实联合概率, 用于排序的分数)
+        candidates = []
         
-        # 路径表示：(路径, 期望命中概率)
-        # 从第一层开始
-        candidate_paths = []
+        # 初始化候选池：第一层（Head 0）的所有可能预测
         for token_idx in range(self.top_k):
-            path = [token_idx]
-            # 第一层的期望准确率 = head 0 的准确率 * token_idx 的衰减因子
-            expected_prob = head_accuracies[0] * (0.85 ** token_idx)
-            candidate_paths.append((path, expected_prob))
-        
-        # 按期望概率排序
-        candidate_paths.sort(key=lambda x: x[1], reverse=True)
-        
-        # 贪心选择第一层的候选
-        candidates_per_head = max(1, max_candidates // (self.num_heads * 2))
-        for path, _ in candidate_paths[:candidates_per_head]:
-            medusa_choices.append(path)
-        
-        # 逐层扩展，确保满足前缀属性
-        current_paths = list(medusa_choices)  # 当前可以被扩展的路径
-        
-        depth = 1
-        while len(medusa_choices) < max_candidates and depth < self.num_heads:
-            new_paths = []
+            # 第一层的期望准确率 = head 0 的准确率 * 该层特定的衰减因子
+            expected_prob = head_accuracies[0] * (head_decay_rates[0] ** token_idx)
+            # 根据论文，期望贡献恰好等于联合准确率
+            candidates.append(([token_idx], expected_prob, expected_prob))
             
-            for parent_path, parent_prob in [(p, 1.0) for p in current_paths]:
-                if len(medusa_choices) >= max_candidates:
-                    break
-                
-                # 为当前路径扩展下一层
-                for token_idx in range(self.top_k):
-                    if len(medusa_choices) >= max_candidates:
-                        break
-                    
-                    child_path = parent_path + [token_idx]
-                    
-                    # 计算期望命中率
-                    if depth < len(head_accuracies):
-                        # 使用当前 head 的准确率和衰减因子
-                        expected_prob = parent_prob * head_accuracies[depth] * (0.85 ** token_idx)
-                    else:
-                        expected_prob = parent_prob * 0.1
-                    
-                    # 只保留期望概率足够高的路径
-                    if expected_prob > 0.001:
-                        new_paths.append((child_path, expected_prob))
-                        medusa_choices.append(child_path)
-            
-            # 为下一层更新候选路径（按期望概率排序）
-            new_paths.sort(key=lambda x: x[1], reverse=True)
-            current_paths = [p for p, _ in new_paths[:min(len(new_paths), max_candidates // 2)]]
-            depth += 1
-            
-            if not current_paths:
+        # 使用 Best-First Search 扩展节点，直到选满 max_candidates 个节点
+        for _ in range(max_candidates):
+            if not candidates:
                 break
+                
+            # 全局按期望概率从大到小排序
+            candidates.sort(key=lambda x: x[2], reverse=True)
+            
+            # 取出当前期望概率最高的最优节点
+            best_path, best_prob, best_score = candidates.pop(0)
+            medusa_choices.append(best_path)
+            
+            # 若该路径还能继续往深层扩展，则生成其所有子节点加入候选池
+            depth = len(best_path)
+            if depth < self.num_heads:
+                for token_idx in range(self.top_k):
+                    child_path = best_path + [token_idx]
+                    # 子连乘概率 = 父联合概率 * 当前层预测的概率
+                    step_prob = head_accuracies[depth] * (head_decay_rates[depth] ** token_idx)
+                    child_prob = best_prob * step_prob
+                    candidates.append((child_path, child_prob, child_prob))
         
-        # 验证前缀属性
+        # 验证前缀属性（双重保险）
         medusa_choices = self._validate_prefix_property(medusa_choices)
         
-        # 按长度和值排序（Medusa 要求）
+        # 按长度和值排序（Medusa 框架约定俗成的易读格式）
         medusa_choices.sort(key=lambda x: (len(x), x))
         
         return medusa_choices
@@ -301,51 +276,38 @@ class MedusaTreeBuilderFast:
         return result
     
     def build_tree_from_accuracy(self, stats: Dict, max_candidates: int = 64) -> List[List[int]]:
-        """
-        基于准确率的简化树构建方法
+        """基于准确率的简化树构建方法（基于 Medusa 论文思想连乘评估全量组合）"""
+        print("\nBuilding Medusa tree (accuracy-based with actual decay)...")
         
-        采用 Medusa 论文中的方法：基于 head 准确率分配候选数量
-        """
-        print("\nBuilding Medusa tree (accuracy-based)...")
-        
-        # 计算每个 head 的准确率
+        # 计算每个 head 的准确率及其 decay rate
         head_accuracies = []
+        head_decay_rates = []
         for head_idx in range(self.num_heads):
             if stats['head_accuracy'][head_idx]:
                 acc = np.mean(stats['head_accuracy'][head_idx])
+                hit = np.mean(stats['head_top_k_hit'][head_idx])
             else:
-                acc = 0.0
+                acc, hit = 0.01, 0.01
             head_accuracies.append(acc)
-            print(f"  Head {head_idx}: Top-1 accuracy = {acc:.4f}")
+            r = (hit - acc) / max(hit, 1e-6)
+            r = max(0.01, min(0.95, r))
+            head_decay_rates.append(r)
+            print(f"  Head {head_idx}: Top-1 accuracy = {acc:.4f}, Decay Rate = {r:.4f}")
         
-        # 根据准确率分配每个 head 的候选数量
-        # 准确率越高的 head，分配更多候选
-        total_acc = sum(head_accuracies) + 1e-6
-        candidates_per_head = []
-        for acc in head_accuracies:
-            # 基础分配 + 准确率加权
-            n_candidates = max(1, int(max_candidates * (acc / total_acc)))
-            candidates_per_head.append(min(n_candidates, self.top_k))
-        
-        print(f"  Candidates per head: {candidates_per_head}")
-        
-        # 构建树
         medusa_choices = []
         
-        # 方法1：简单的笛卡尔积（适合小规模）
+        # 笛卡尔积（评估所有可能的路径组合）
         from itertools import product
-        
-        # 生成所有组合
-        ranges = [range(n) for n in candidates_per_head]
+        ranges = [range(self.top_k) for _ in range(self.num_heads)]
         
         all_paths = []
         for depth in range(1, self.num_heads + 1):
             for combo in product(*ranges[:depth]):
                 path = list(combo)
-                # 计算该路径的期望价值
+                # 计算论文中定义的连乘期望贡献
                 expected_value = 1.0
                 for i, k in enumerate(path):
-                    expected_value *= head_accuracies[i] * (0.9 ** k)
+                    expected_value *= head_accuracies[i] * (head_decay_rates[i] ** k)
                 all_paths.append((path, expected_value))
         
         # 按期望值排序，取 top candidates
@@ -358,7 +320,6 @@ class MedusaTreeBuilderFast:
         medusa_choices.sort(key=lambda x: (len(x), x))
         
         return medusa_choices
-    
     def save_tree_config(self, medusa_choices: List[List[int]], output_path: str, 
                          stats: Dict, tree_name: str = "pangu_optimized"):
         """保存树配置到 Python 文件"""
@@ -406,7 +367,7 @@ def main():
                         help="Max sequence length per sample")
     parser.add_argument("--top_k", type=int, default=10, 
                         help="Top-K candidates per head")
-    parser.add_argument("--max_candidates", type=int, default=64, 
+    parser.add_argument("--max_candidates", type=int, default=32, 
                         help="Maximum tree candidates")
     parser.add_argument("--output", type=str, default="medusa_tree_optimized.py", 
                         help="Output tree configuration file")

@@ -509,6 +509,7 @@ class MedusaModelABC(nn.Module):
                 ),
                 "new_token": new_token,
                 "accm_token": accm_token,
+                "accept_length": accept_length,
                 "idx": idx,
             }
 

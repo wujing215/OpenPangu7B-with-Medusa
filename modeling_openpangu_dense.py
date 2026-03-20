@@ -471,31 +471,45 @@ class PanguEmbeddedModel(PanguEmbeddedPreTrainedModel):
 
         # [MODIFIED] For Medusa with custom KV cache, we need to create a custom attention mask
         # that accounts for past tokens
-        if past_seen_tokens_for_mask > 0 and hasattr(self, "medusa_mask") and self.medusa_mask is not None:
+        _has_mask = hasattr(self, "medusa_mask") and self.medusa_mask is not None
+        if past_seen_tokens_for_mask > 0 and _has_mask:
             # Medusa tree decoding: create custom causal mask
             seq_len = inputs_embeds.shape[1]
             total_len = past_seen_tokens_for_mask + seq_len
-            
-            # Start with causal mask: new tokens can see all past tokens
+
+            # [FIX] Use float type with 0 for attend, -inf for mask
+            # This is because attention_mask is ADDED to attn_weights (not used as bool mask)
             # Shape: [1, 1, seq_len, total_len]
-            causal_mask = torch.zeros((1, 1, seq_len, total_len), dtype=torch.bool, device=inputs_embeds.device)
-            
-            # All query positions can attend to all past key positions
-            causal_mask[:, :, :, :past_seen_tokens_for_mask] = True
-            
+            min_dtype = torch.finfo(inputs_embeds.dtype).min
+            causal_mask = torch.full(
+                (1, 1, seq_len, total_len),
+                min_dtype,
+                dtype=inputs_embeds.dtype,
+                device=inputs_embeds.device
+            )
+
+            # All query positions can attend to all past key positions (set to 0)
+            causal_mask[:, :, :, :past_seen_tokens_for_mask] = 0
+
             # For the new tokens (tree candidates), apply medusa_mask
             medusa_mask = self.medusa_mask
             medusa_len = medusa_mask.size(-1)
-            
-            # medusa_mask is [1, 1, medusa_len, medusa_len], apply it to the new token region
+
+            # medusa_mask is [1, 1, medusa_len, medusa_len], where 1=can attend, 0=cannot attend
+            # We need to convert: 1 -> 0 (can attend), 0 -> min_dtype (cannot attend)
             if seq_len == medusa_len:
-                causal_mask[:, :, :, past_seen_tokens_for_mask:] = (medusa_mask != 0)
+                # Set positions where medusa_mask != 0 to 0 (can attend)
+                causal_mask[:, :, :, past_seen_tokens_for_mask:] = torch.where(
+                    medusa_mask != 0,
+                    torch.tensor(0, dtype=inputs_embeds.dtype, device=inputs_embeds.device),
+                    torch.tensor(min_dtype, dtype=inputs_embeds.dtype, device=inputs_embeds.device)
+                )
             else:
                 # Fallback: use simple causal mask for new tokens
                 for i in range(seq_len):
                     for j in range(seq_len):
                         if i >= j:  # causal: can only attend to past and current
-                            causal_mask[:, :, i, past_seen_tokens_for_mask + j] = True
+                            causal_mask[:, :, i, past_seen_tokens_for_mask + j] = 0
         else:
             # Standard case: use create_causal_mask
             causal_mask = create_causal_mask(

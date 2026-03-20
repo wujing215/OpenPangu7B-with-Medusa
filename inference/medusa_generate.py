@@ -215,17 +215,33 @@ class MedusaPanguInference:
             # 流式输出：返回生成器
             return self._stream_generate(generator)
         else:
-            # 非流式：收集所有输出
+            # 非流式：收集所有输出和统计信息
             final_text = ""
+            accept_lengths = []
+            total_steps = 0
             for output in generator:
                 final_text = output["text"]
+                accept_lengths.append(output.get("accept_length", 1))
+                total_steps += 1
             
-            # import pdb; 
-            total_decode = float(output['new_token'])
-            decode_step = float(output['idx'])
+            # 打印统计信息
+            total_accepted = sum(accept_lengths)
+            avg_accept_length = total_accepted / total_steps if total_steps > 0 else 0
+            print(f"\n=== Medusa Generation Stats ===")
+            print(f"Total steps: {total_steps}")
+            print(f"Total accepted tokens: {total_accepted}")
+            print(f"Average accept length per step: {avg_accept_length:.2f}")
+            if accept_lengths:
+                print(f"Accept length distribution: min={min(accept_lengths)}, max={max(accept_lengths)}")
+                print(f"Accept lengths: {accept_lengths[:20]}{'...' if len(accept_lengths) > 20 else ''}")
+            print(f"================================\n")
             
-            print(f"Total decode: {total_decode} tokens in {decode_step} steps, accept rate: {total_decode / decode_step:.2f}%")
-            return final_text
+            return final_text, {
+                "total_steps": total_steps,
+                "total_accepted": total_accepted,
+                "avg_accept_length": avg_accept_length,
+                "accept_lengths": accept_lengths
+            }
     
     def _stream_generate(self, generator):
         """流式生成的辅助方法"""
