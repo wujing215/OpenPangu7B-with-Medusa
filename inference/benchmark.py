@@ -239,7 +239,7 @@ def benchmark_medusa(model_path, medusa_dir, prompt, max_new_tokens, num_runs=3,
     """测试 Medusa 模型（投机解码）"""
     from medusa_generate import MedusaPanguInference
     from medusa_choices import pangu_stage2
-    from medusa_choices import pangu_5heads_0109
+    from medusa_choices import pangu_5heads_32_nodes
     
     print("\n" + "=" * 60)
     print(f"Medusa: OpenPangu + Medusa Heads (Speculative Decoding) on {DEVICE_TAG}")
@@ -282,18 +282,26 @@ def benchmark_medusa(model_path, medusa_dir, prompt, max_new_tokens, num_runs=3,
     print(f"Benchmarking ({num_runs} runs)...")
     times = []
     output_tokens_list = []
-    accepted_tokens_list = []
+    all_accept_stats = []
     
     for i in range(num_runs):
         device_synchronize() # 适配 NPU 同步
         start_time = time.perf_counter()
         
-        output_text = model.generate(
+        result = model.generate(
             formatted_prompt, 
             max_steps=max_new_tokens, 
             temperature=0.0,
-            medusa_choices=pangu_5heads_0109,
+            medusa_choices=pangu_5heads_32_nodes,
         )
+        
+        # 解包结果
+        if isinstance(result, tuple):
+            output_text, accept_stats = result
+            all_accept_stats.append(accept_stats)
+        else:
+            output_text = result
+            accept_stats = None
         
         device_synchronize() # 适配 NPU 同步
         end_time = time.perf_counter()
@@ -307,7 +315,12 @@ def benchmark_medusa(model_path, medusa_dir, prompt, max_new_tokens, num_runs=3,
         times.append(elapsed)
         output_tokens_list.append(output_tokens)
         
-        print(f"  Run {i+1}: {elapsed:.3f}s, {output_tokens} tokens")
+        if accept_stats:
+            print(f"  Run {i+1}: {elapsed:.3f}s, {output_tokens} tokens | "
+                  f"Avg accept: {accept_stats['avg_accept_length']:.2f}, "
+                  f"Total steps: {accept_stats['total_steps']}")
+        else:
+            print(f"  Run {i+1}: {elapsed:.3f}s, {output_tokens} tokens")
     
     # 计算统计
     avg_time = sum(times) / len(times)
@@ -315,12 +328,22 @@ def benchmark_medusa(model_path, medusa_dir, prompt, max_new_tokens, num_runs=3,
     tps = avg_tokens / avg_time
     tpot = (avg_time / avg_tokens) * 1000  # ms per token
     
+    # 计算 accept length 统计
+    if all_accept_stats:
+        avg_accept_length = sum(s['avg_accept_length'] for s in all_accept_stats) / len(all_accept_stats)
+        avg_total_steps = sum(s['total_steps'] for s in all_accept_stats) / len(all_accept_stats)
+    else:
+        avg_accept_length = 0
+        avg_total_steps = 0
+    
     results = {
         "method": "Medusa (Speculative Decoding)",
         "avg_time": avg_time,
         "avg_tokens": avg_tokens,
         "tps": tps,
         "tpot": tpot,
+        "avg_accept_length": avg_accept_length,
+        "avg_total_steps": avg_total_steps,
     }
     
     print(f"\n--- Medusa Results ---")
@@ -328,6 +351,9 @@ def benchmark_medusa(model_path, medusa_dir, prompt, max_new_tokens, num_runs=3,
     print(f"Average tokens: {avg_tokens:.1f}")
     print(f"TPS: {tps:.2f} tokens/s")
     print(f"TPOT: {tpot:.2f} ms/token")
+    if all_accept_stats:
+        print(f"Average accept length per step: {avg_accept_length:.2f}")
+        print(f"Average total steps: {avg_total_steps:.1f}")
     
     # 清理显存
     del model
@@ -344,7 +370,7 @@ def main():
                         default="/root/OpenPangu7B-on-NVIDIA/test_medusa_mlp_._medusa_3_lr_0.001_layers_1",
                         help="Medusa head directory")
     parser.add_argument("--prompt", type=str, 
-                        default="请详细介绍一下大语言模型的工作原理。",
+                        default="Give me a short introduction to LLM.",
                         help="Test prompt")
     parser.add_argument("--max_tokens", type=int, default=256,
                         help="Maximum new tokens to generate")

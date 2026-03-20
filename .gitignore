@@ -11,9 +11,9 @@ __pycache__/
 *.pyc
 
 # Logs and process files
-*.log
+log/*
 *.pid
-*.md
+docs/*
 trace*
 log/*
 

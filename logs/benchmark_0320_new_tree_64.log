@@ -1,0 +1,132 @@
+[Warning] 未检测到 torch_npu，退化使用 NVIDIA CUDA。
+============================================================
+OpenPangu + Medusa Performance Benchmark on NVIDIA CUDA
+============================================================
+Base model: /home/jingwu/work/openPangu-Embedded-7B-V1.1
+Medusa dir: /home/jingwu/work/openPangu-Embedded-7B-V1.1/medusa_heads_5
+Prompt: Give me a short introduction to LLM....
+Max tokens: 256
+Runs: 3 (+ 1 warmup)
+============================================================
+Baseline: OpenPangu (Manual Loop) on NVIDIA CUDA
+Profile Mode: False (Per-step timing enabled)
+============================================================
+Loading model...
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:01<00:03,  1.19s/it]Loading checkpoint shards:  50%|█████     | 2/4 [00:02<00:02,  1.14s/it]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:03<00:01,  1.11s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:03<00:00,  1.31it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:03<00:00,  1.11it/s]
+The following generation flags are not valid and may be ignored: ['top_p', 'top_k']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+
+============================================================
+1. 运行模式: 基准串行推理 (Baseline)
+2. 运行环境: NVIDIA CUDA, Device: cuda:0)
+3. 模型状态: 加载模型为openPangu系列开源模型
+   - 模型路径: /home/jingwu/work/openPangu-Embedded-7B-V1.1
+============================================================
+
+Prompt Length: 27
+
+Warmup (1 runs)...
+Benchmarking (3 runs)...
+
+--- Run 1 ---
+Run 1 Finished: 6.638s, 256 tokens
+
+--- Run 2 ---
+Run 2 Finished: 6.657s, 256 tokens
+
+--- Run 3 ---
+Run 3 Finished: 6.662s, 256 tokens
+
+--- Baseline Results ---
+TPS: 38.48 tokens/s
+TPOT: 25.99 ms/token
+[medusa_compat] Medusa compatibility layer initialized
+[medusa_compat] Medusa path: /home/jingwu/work/openPangu-Embedded-7B-V1.1/third_party/Medusa
+[Warning] 未检测到 torch_npu，Profiling 将在 NVIDIA CUDA 上运行。
+
+============================================================
+Medusa: OpenPangu + Medusa Heads (Speculative Decoding) on NVIDIA CUDA
+============================================================
+Loading model...
+Loading tokenizer from /home/jingwu/work/openPangu-Embedded-7B-V1.1/medusa_heads_5...
+Loading config from /home/jingwu/work/openPangu-Embedded-7B-V1.1...
+Loading MedusaModelPangu from /home/jingwu/work/openPangu-Embedded-7B-V1.1...
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:01<00:03,  1.23s/it]Loading checkpoint shards:  50%|█████     | 2/4 [00:02<00:02,  1.15s/it]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:03<00:01,  1.13s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:03<00:00,  1.29it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:03<00:00,  1.09it/s]
+Some weights of MedusaModelPangu were not initialized from the model checkpoint at /home/jingwu/work/openPangu-Embedded-7B-V1.1 and are newly initialized: ['medusa_head.0.0.linear.bias', 'medusa_head.0.0.linear.weight', 'medusa_head.0.1.weight', 'medusa_head.1.0.linear.bias', 'medusa_head.1.0.linear.weight', 'medusa_head.1.1.weight', 'medusa_head.2.0.linear.bias', 'medusa_head.2.0.linear.weight', 'medusa_head.2.1.weight', 'medusa_head.3.0.linear.bias', 'medusa_head.3.0.linear.weight', 'medusa_head.3.1.weight', 'medusa_head.4.0.linear.bias', 'medusa_head.4.0.linear.weight', 'medusa_head.4.1.weight']
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+Loading Medusa heads from /home/jingwu/work/openPangu-Embedded-7B-V1.1/medusa_heads_5/medusa_lm_head.safetensors...
+Model loaded successfully! Device: cuda:0, Dtype: torch.float16
+Medusa config: 5 heads, 1 layers
+
+============================================================
+1. 运行模式: 支持并行推理 (Medusa)
+2. 运行环境: NVIDIA CUDA, Device: cuda:0)
+3. 模型状态: 加载模型为openPangu系列开源模型
+   - 模型路径: /home/jingwu/work/openPangu-Embedded-7B-V1.1
+============================================================
+
+Input length: 27 tokens
+Max steps: 256
+
+Warmup (1 runs)...
+
+=== Medusa Generation Stats ===
+Total steps: 123
+Total accepted tokens: 119
+Average accept length per step: 0.97
+Accept length distribution: min=0, max=3
+Accept lengths: [tensor(3, device='cuda:0'), tensor(2, device='cuda:0'), tensor(3, device='cuda:0'), tensor(3, device='cuda:0'), tensor(2, device='cuda:0'), tensor(3, device='cuda:0'), tensor(2, device='cuda:0'), tensor(1, device='cuda:0'), tensor(2, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(0, device='cuda:0'), tensor(0, device='cuda:0'), tensor(1, device='cuda:0'), tensor(0, device='cuda:0'), tensor(0, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0')]...
+================================
+
+Benchmarking (3 runs)...
+
+=== Medusa Generation Stats ===
+Total steps: 119
+Total accepted tokens: 123
+Average accept length per step: 1.03
+Accept length distribution: min=0, max=4
+Accept lengths: [tensor(4, device='cuda:0'), tensor(2, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(2, device='cuda:0'), tensor(2, device='cuda:0'), tensor(3, device='cuda:0'), tensor(2, device='cuda:0'), tensor(1, device='cuda:0'), tensor(2, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(0, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(0, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0')]...
+================================
+
+  Run 1: 5.671s, 242 tokens | Avg accept: 1.03, Total steps: 119
+
+=== Medusa Generation Stats ===
+Total steps: 119
+Total accepted tokens: 123
+Average accept length per step: 1.03
+Accept length distribution: min=0, max=4
+Accept lengths: [tensor(4, device='cuda:0'), tensor(2, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(2, device='cuda:0'), tensor(2, device='cuda:0'), tensor(3, device='cuda:0'), tensor(2, device='cuda:0'), tensor(1, device='cuda:0'), tensor(2, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(0, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(0, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0')]...
+================================
+
+  Run 2: 5.672s, 242 tokens | Avg accept: 1.03, Total steps: 119
+
+=== Medusa Generation Stats ===
+Total steps: 119
+Total accepted tokens: 123
+Average accept length per step: 1.03
+Accept length distribution: min=0, max=4
+Accept lengths: [tensor(4, device='cuda:0'), tensor(2, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(2, device='cuda:0'), tensor(2, device='cuda:0'), tensor(3, device='cuda:0'), tensor(2, device='cuda:0'), tensor(1, device='cuda:0'), tensor(2, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(0, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(0, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0'), tensor(1, device='cuda:0')]...
+================================
+
+  Run 3: 5.691s, 242 tokens | Avg accept: 1.03, Total steps: 119
+
+--- Medusa Results ---
+Average time: 5.678s
+Average tokens: 242.0
+TPS: 42.62 tokens/s
+TPOT: 23.46 ms/token
+Average accept length per step: 1.03
+Average total steps: 119.0
+
+============================================================
+COMPARISON SUMMARY
+============================================================
+
+Metric                    Baseline        Medusa          Speedup   
+-----------------------------------------------------------------
+TPS (tokens/s)            38.48           42.62           1.11      x
+TPOT (ms/token)           25.99           23.46           1.11      x
+Total time (s)            6.652           5.678           1.17      x
+Tokens generated          256.0           242.0          
+
+🚀 Medusa achieves 1.11x speedup!
+⚠️  Moderate speedup. Consider tuning Medusa parameters.
